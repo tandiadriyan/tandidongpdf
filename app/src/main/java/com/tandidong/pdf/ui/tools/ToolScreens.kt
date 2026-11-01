@@ -1,0 +1,442 @@
+package com.tandidong.pdf.ui.tools
+
+import android.graphics.Bitmap
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.tandidong.pdf.core.DocxWriter
+import com.tandidong.pdf.core.PageOps
+import com.tandidong.pdf.core.PageText
+import com.tandidong.pdf.core.PdfIO
+import com.tandidong.pdf.core.TextDiff
+import com.tandidong.pdf.core.TextExtractor
+import com.tandidong.pdf.data.FileUtil
+import com.tandidong.pdf.session.DocumentSession
+import com.tandidong.pdf.ui.AppViewModel
+import com.tandidong.pdf.ui.BusyOverlay
+import com.tandidong.pdf.ui.editor.ImageToPdf
+import com.tom_roush.pdfbox.pdmodel.PDDocument
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicLong
+
+private val ids = AtomicLong(1)
+
+@Composable
+private fun ToolScaffold(
+    title: String,
+    vm: AppViewModel,
+    fab: @Composable () -> Unit = {},
+    bottom: @Composable () -> Unit = {},
+    content: @Composable (PaddingValues) -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(title) },
+                navigationIcon = { IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+            )
+        },
+        floatingActionButton = fab,
+        bottomBar = bottom,
+        content = content,
+    )
+}
+
+// ------------------------------------------------------------------ combine
+
+private data class CombineItem(val id: Long, val uri: Uri, val name: String, val isImage: Boolean)
+
+@Composable
+fun CombineScreen(vm: AppViewModel) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val items = remember { mutableStateListOf<CombineItem>() }
+    var busy by remember { mutableStateOf<String?>(null) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        for (u in uris) {
+            val type = context.contentResolver.getType(u) ?: ""
+            items.add(CombineItem(ids.getAndIncrement(), u, FileUtil.displayName(context, u), type.startsWith("image/")))
+        }
+    }
+    ToolScaffold(
+        "Combine files", vm,
+        fab = {
+            ExtendedFloatingActionButton(
+                onClick = { picker.launch(arrayOf("application/pdf", "image/*")) },
+                icon = { Icon(Icons.Outlined.Add, null) },
+                text = { Text("Add files") },
+            )
+        },
+        bottom = {
+            Surface(tonalElevation = 3.dp) {
+                Button(
+                    enabled = items.size >= 1,
+                    onClick = {
+                        scope.launch {
+                            busy = "Combining…"
+                            val opened = ArrayList<PDDocument>()
+                            try {
+                                val dest = PDDocument()
+                                opened.add(dest)
+                                for (it in items) {
+                                    if (it.isImage) {
+                                        val bmp = withContext(Dispatchers.IO) { ImageToPdf.decode(context, it.uri, 2400) } ?: continue
+                                        withContext(Dispatchers.IO) { ImageToPdf.addPage(dest, bmp, ImageToPdf.Options()) }
+                                    } else {
+                                        val imported = vm.importForReading(it.uri) ?: continue
+                                        withContext(Dispatchers.IO) {
+                                            val src = PdfIO.load(imported.first, imported.second)
+                                            opened.add(src)
+                                            PageOps.appendAll(dest, listOf(src))
+                                        }
+                                    }
+                                }
+                                if (dest.numberOfPages == 0) {
+                                    vm.message("Nothing to combine")
+                                } else {
+                                    val out = vm.scratchFile("combined-${System.nanoTime()}.pdf")
+                                    withContext(Dispatchers.IO) { PdfIO.save(dest, out) }
+                                    vm.openGenerated(out, vm.newDocumentName("Combined"))
+                                }
+                            } catch (e: Exception) {
+                                vm.message("Couldn't combine: ${e.message}")
+                            } finally {
+                                withContext(Dispatchers.IO) { opened.forEach { d -> try { d.close() } catch (e: Exception) { } } }
+                                busy = null
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+                ) { Text(if (items.isEmpty()) "Add PDFs or images to combine" else "Combine ${items.size} file${if (items.size == 1) "" else "s"}") }
+            }
+        },
+    ) { padding ->
+        if (items.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Text("Add PDFs and images, arrange them, then combine into one PDF.", modifier = Modifier.padding(32.dp))
+            }
+        } else {
+            LazyColumn(contentPadding = padding) {
+                itemsIndexed(items, key = { _, it -> it.id }) { i, it ->
+                    ListItem(
+                        leadingContent = { Icon(if (it.isImage) Icons.Outlined.Image else Icons.Outlined.PictureAsPdf, null, tint = MaterialTheme.colorScheme.primary) },
+                        headlineContent = { Text(it.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = { Text("${i + 1}") },
+                        trailingContent = {
+                            Row {
+                                IconButton(onClick = { if (i > 0) items.add(i - 1, items.removeAt(i)) }, enabled = i > 0) { Icon(Icons.Outlined.ArrowUpward, "Up") }
+                                IconButton(onClick = { if (i < items.size - 1) items.add(i + 1, items.removeAt(i)) }, enabled = i < items.size - 1) { Icon(Icons.Outlined.ArrowDownward, "Down") }
+                                IconButton(onClick = { items.removeAt(i) }) { Icon(Icons.Outlined.Close, "Remove") }
+                            }
+                        },
+                    )
+                }
+            }
+        }
+    }
+    busy?.let { BusyOverlay(it, null) }
+}
+
+// ------------------------------------------------------------------ images to PDF
+
+private data class ImgItem(val id: Long, val uri: Uri, val thumb: Bitmap?)
+
+@Composable
+fun ImagesToPdfScreen(vm: AppViewModel) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val items = remember { mutableStateListOf<ImgItem>() }
+    var size by remember { mutableStateOf(ImageToPdf.PageSize.FIT) }
+    var margin by remember { mutableStateOf(0f) }
+    var quality by remember { mutableStateOf(0.85f) }
+    var busy by remember { mutableStateOf<String?>(null) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(100)) { uris ->
+        scope.launch {
+            for (u in uris) {
+                val t = withContext(Dispatchers.IO) { ImageToPdf.decode(context, u, 240) }
+                items.add(ImgItem(ids.getAndIncrement(), u, t))
+            }
+        }
+    }
+    LaunchedEffect(Unit) { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+    ToolScaffold(
+        "Images to PDF", vm,
+        fab = {
+            ExtendedFloatingActionButton(
+                onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                icon = { Icon(Icons.Outlined.AddPhotoAlternate, null) }, text = { Text("Add images") },
+            )
+        },
+        bottom = {
+            Surface(tonalElevation = 3.dp) {
+                Column(Modifier.navigationBarsPadding().padding(12.dp)) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (s in ImageToPdf.PageSize.values()) FilterChip(selected = size == s, onClick = { size = s }, label = { Text(s.label) })
+                        FilterChip(selected = margin > 0f, onClick = { margin = if (margin > 0f) 0f else 24f }, label = { Text("Margins") })
+                        FilterChip(selected = quality < 0.8f, onClick = { quality = if (quality < 0.8f) 0.85f else 0.65f }, label = { Text("Smaller file") })
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        enabled = items.isNotEmpty(),
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            scope.launch {
+                                busy = "Creating PDF…"
+                                try {
+                                    val out = vm.scratchFile("images-${System.nanoTime()}.pdf")
+                                    val opts = ImageToPdf.Options(size, margin, quality)
+                                    withContext(Dispatchers.IO) {
+                                        PDDocument().use { d ->
+                                            for (it in items) ImageToPdf.decode(context, it.uri, 2400)?.let { b -> ImageToPdf.addPage(d, b, opts); b.recycle() }
+                                            PdfIO.save(d, out)
+                                        }
+                                    }
+                                    vm.back()
+                                    vm.openGenerated(out, vm.newDocumentName("Images"))
+                                } catch (e: Exception) {
+                                    vm.message("Couldn't create PDF: ${e.message}")
+                                } finally {
+                                    busy = null
+                                }
+                            }
+                        },
+                    ) { Text("Create PDF (${items.size} page${if (items.size == 1) "" else "s"})") }
+                }
+            }
+        },
+    ) { padding ->
+        LazyColumn(contentPadding = padding) {
+            itemsIndexed(items, key = { _, it -> it.id }) { i, it ->
+                ListItem(
+                    leadingContent = {
+                        val t = it.thumb
+                        if (t != null) Image(t.asImageBitmap(), null, contentScale = ContentScale.Crop, modifier = Modifier.size(56.dp).clip(RoundedCornerShape(6.dp)))
+                        else Icon(Icons.Outlined.Image, null)
+                    },
+                    headlineContent = { Text("Page ${i + 1}") },
+                    trailingContent = {
+                        Row {
+                            IconButton(onClick = { if (i > 0) items.add(i - 1, items.removeAt(i)) }, enabled = i > 0) { Icon(Icons.Outlined.ArrowUpward, "Up") }
+                            IconButton(onClick = { if (i < items.size - 1) items.add(i + 1, items.removeAt(i)) }, enabled = i < items.size - 1) { Icon(Icons.Outlined.ArrowDownward, "Down") }
+                            IconButton(onClick = { items.removeAt(i) }) { Icon(Icons.Outlined.Close, "Remove") }
+                        }
+                    },
+                )
+            }
+        }
+    }
+    busy?.let { BusyOverlay(it, null) }
+}
+
+// ------------------------------------------------------------------ compare
+
+private data class PageDiff(val page: Int, val inserted: Int, val deleted: Int, val chunks: List<TextDiff.Chunk>)
+
+@Composable
+fun CompareScreen(vm: AppViewModel) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var a by remember { mutableStateOf<Uri?>(null) }
+    var b by remember { mutableStateOf<Uri?>(null) }
+    var result by remember { mutableStateOf<List<PageDiff>?>(null) }
+    var summary by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf<String?>(null) }
+    val pickA = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { if (it != null) { a = it; result = null } }
+    val pickB = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { if (it != null) { b = it; result = null } }
+
+    suspend fun texts(uri: Uri): List<String>? {
+        val imported = vm.importForReading(uri) ?: return null
+        return withContext(Dispatchers.IO) {
+            val d = PdfIO.load(imported.first, imported.second)
+            try { (0 until d.numberOfPages).map { TextExtractor.extract(d, it).text } } finally { d.close(); imported.first.delete() }
+        }
+    }
+
+    ToolScaffold("Compare files", vm) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { pickA.launch(arrayOf("application/pdf")) }, modifier = Modifier.weight(1f)) {
+                    Text(a?.let { FileUtil.displayName(context, it) } ?: "Original…", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                OutlinedButton(onClick = { pickB.launch(arrayOf("application/pdf")) }, modifier = Modifier.weight(1f)) {
+                    Text(b?.let { FileUtil.displayName(context, it) } ?: "Revised…", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Button(
+                enabled = a != null && b != null,
+                onClick = {
+                    val ua = a ?: return@Button
+                    val ub = b ?: return@Button
+                    scope.launch {
+                        busy = "Comparing…"
+                        try {
+                            val ta = texts(ua) ?: return@launch
+                            val tb = texts(ub) ?: return@launch
+                            val diffs = withContext(Dispatchers.Default) {
+                                (0 until maxOf(ta.size, tb.size)).mapNotNull { i ->
+                                    val s = TextDiff.compare(ta.getOrElse(i) { "" }, tb.getOrElse(i) { "" })
+                                    if (s.insertedWords + s.deletedWords == 0) null else PageDiff(i, s.insertedWords, s.deletedWords, s.chunks)
+                                }
+                            }
+                            result = diffs
+                            summary = if (diffs.isEmpty()) "No text differences found (${ta.size} vs ${tb.size} pages)."
+                            else "${diffs.size} page(s) changed · ${diffs.sumOf { it.inserted }} words added · ${diffs.sumOf { it.deleted }} words removed" +
+                                if (ta.size != tb.size) " · page count ${ta.size} → ${tb.size}" else ""
+                        } catch (e: Exception) {
+                            vm.message("Compare failed: ${e.message}")
+                        } finally {
+                            busy = null
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            ) { Text("Compare text") }
+            if (summary.isNotEmpty()) Text(summary, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(12.dp))
+            val r = result
+            if (r != null) {
+                LazyColumn(Modifier.weight(1f)) {
+                    itemsIndexed(r) { _, d ->
+                        Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text("Page ${d.page + 1}  ·  +${d.inserted} / −${d.deleted}", fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(6.dp))
+                                Text(diffText(d.chunks), style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    busy?.let { BusyOverlay(it, null) }
+}
+
+private fun diffText(chunks: List<TextDiff.Chunk>) = buildAnnotatedString {
+    for (c in chunks) {
+        when (c.op) {
+            TextDiff.Op.EQUAL -> {
+                val words = c.text.split(' ')
+                // Collapse long unchanged stretches to keep the focus on changes.
+                if (words.size > 30) append(words.take(12).joinToString(" ") + " … " + words.takeLast(12).joinToString(" ")) else append(c.text)
+            }
+            TextDiff.Op.INSERT -> withStyle(SpanStyle(background = Color(0x6643A047), color = Color(0xFF1B5E20))) { append(c.text) }
+            TextDiff.Op.DELETE -> withStyle(SpanStyle(background = Color(0x55E53935), color = Color(0xFFB71C1C), textDecoration = TextDecoration.LineThrough)) { append(c.text) }
+        }
+        append(' ')
+    }
+}
+
+// ------------------------------------------------------------------ liquid mode
+
+@Composable
+fun ReflowScreen(vm: AppViewModel, session: DocumentSession) {
+    var pages by remember { mutableStateOf<List<PageText>?>(null) }
+    var scale by remember { mutableStateOf(1f) }
+    LaunchedEffect(session.version) { pages = try { session.allText() } catch (e: Exception) { emptyList() } }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Liquid mode", maxLines = 1) },
+                navigationIcon = { IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                actions = {
+                    IconButton(onClick = { scale = (scale - 0.1f).coerceAtLeast(0.7f) }) { Icon(Icons.Outlined.TextDecrease, "Smaller text") }
+                    IconButton(onClick = { scale = (scale + 0.1f).coerceAtMost(2.2f) }) { Icon(Icons.Outlined.TextIncrease, "Larger text") }
+                },
+            )
+        },
+    ) { padding ->
+        val list = pages
+        if (list == null) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { Text("Preparing reading view…") }
+        } else if (list.all { it.isBlank }) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Text("No text found. If this is a scanned document, use Recognize text (OCR) first.", modifier = Modifier.padding(32.dp))
+            }
+        } else {
+            LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 32.dp)) {
+                itemsIndexed(list) { i, page ->
+                    Column {
+                        Text("Page ${i + 1}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+                        val paras = DocxWriter.paragraphs(page)
+                        val body = paras.map { it.sizePt }.sorted().let { if (it.isEmpty()) 11f else it[it.size / 2] }
+                        for (p in paras) {
+                            val heading = p.sizePt > body * 1.25f
+                            Text(
+                                p.text,
+                                fontSize = ((if (heading) 20f else 16f) * scale).sp,
+                                lineHeight = ((if (heading) 26f else 24f) * scale).sp,
+                                fontWeight = if (heading || p.bold) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier.padding(vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Suppress("unused")
+private val unusedWidth = Modifier.width(1.dp).background(Color.Transparent)

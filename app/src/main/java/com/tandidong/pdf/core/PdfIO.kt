@@ -35,9 +35,12 @@ object PdfIO {
     inline fun <T> transform(input: File, output: File, password: String? = null, block: (PDDocument) -> T): T {
         val doc = load(input, password)
         try {
+            val wasEncrypted = doc.isEncrypted
             val result = block(doc)
-            if (doc.isEncrypted && !doc.isAllSecurityToBeRemoved) {
-                // Working copies are kept decrypted; callers re-protect on export if needed.
+            if (wasEncrypted && !doc.isAllSecurityToBeRemoved &&
+                doc.encryption?.securityHandler?.hasProtectionPolicy() != true
+            ) {
+                // Source security cannot be re-applied without a policy; working copies stay decrypted.
                 doc.isAllSecurityToBeRemoved = true
             }
             save(doc, output)
