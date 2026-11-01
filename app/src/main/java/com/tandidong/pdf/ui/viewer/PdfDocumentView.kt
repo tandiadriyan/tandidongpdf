@@ -55,6 +55,7 @@ import com.tandidong.pdf.session.DocumentSession
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
@@ -118,42 +119,48 @@ fun PdfDocumentView(
         val vp = IntSize(constraints.maxWidth, constraints.maxHeight)
         LaunchedEffect(geometries, vp) { state.setup(geometries, vp, density.density) }
 
-        // Render scheduling: base bitmaps for visible pages, then crisp tiles when zoomed in.
+        // Base page bitmaps: conflated so renders in flight are never cancelled mid-fling.
         LaunchedEffect(session, version) {
-            snapshotFlow { Triple(state.visiblePages(), state.zoom, Offset(state.scrollX, state.scrollY)) to state.layoutVersion }
-                .collectLatest { (t, _) ->
-                    val (visible, zoom, _) = t
-                    if (visible.isEmpty()) return@collectLatest
+            snapshotFlow { Triple(state.visiblePages(), state.zoom, state.layoutVersion) }
+                .conflate()
+                .collect { (visible, zoom, _) ->
+                    if (visible.isEmpty()) return@collect
                     val center = state.currentPage()
                     val wanted = (listOf(center) + visible.toList() + listOf(visible.first - 1, visible.last + 1))
                         .distinct().filter { it in 0 until state.pageCount }
                     // Drop far-away bitmaps to bound memory.
-                    pageBitmaps.keys.filter { it < visible.first - 4 || it > visible.last + 4 }.forEach { pageBitmaps.remove(it) }
-                    tiles.keys.filter { it !in visible }.forEach { tiles.remove(it) }
-                    val baseZoom = min(zoom, 1.6f)
+                    pageBitmaps.keys.filter { it < visible.first - 2 || it > visible.last + 2 }.forEach { pageBitmaps.remove(it) }
+                    val baseZoom = min(zoom, 1.25f)
                     for (i in wanted) {
                         val target = (((state.pageWidthPx(i) / zoom) * baseZoom) / 64f).roundToInt().coerceAtLeast(1) * 64
                         val have = pageBitmaps[i]
                         if (have != null && have.version == version && have.width >= target * 0.8f && have.width <= target * 1.3f) continue
-                        val bmp = session.renderPage(i, target.coerceAtMost(3000), version) ?: continue
+                        val bmp = session.renderPage(i, target.coerceAtMost(2600), version) ?: continue
                         pageBitmaps[i] = PageBitmap(version, bmp.width, bmp.asImageBitmap())
                     }
-                    if (zoom > baseZoom * 1.05f) {
-                        delay(140) // wait for gestures to settle
-                        for (i in visible) {
-                            val r = state.pageRect(i)
-                            val visLeft = max(0f, -r.left).toInt()
-                            val visTop = max(0f, -r.top).toInt()
-                            val visRight = min(r.width, state.viewport.width - r.left).toInt()
-                            val visBottom = min(r.height, state.viewport.height - r.top).toInt()
-                            if (visRight - visLeft < 2 || visBottom - visTop < 2) continue
-                            val fullW = r.width.roundToInt()
-                            val fullH = r.height.roundToInt()
-                            val bmp: Bitmap = session.renderTile(i, fullW, fullH, visLeft, visTop, visRight, visBottom, version) ?: continue
-                            tiles[i] = TileBitmap(version, fullW, visLeft, visTop, bmp.asImageBitmap())
-                        }
-                    } else {
+                }
+        }
+        // Crisp tiles for the visible area when zoomed past the base resolution (debounced).
+        LaunchedEffect(session, version) {
+            snapshotFlow { Triple(state.visiblePages(), state.zoom, Offset(state.scrollX, state.scrollY)) }
+                .collectLatest { (visible, zoom, _) ->
+                    tiles.keys.filter { it !in visible }.forEach { tiles.remove(it) }
+                    if (zoom <= 1.3f) {
                         tiles.clear()
+                        return@collectLatest
+                    }
+                    delay(150)
+                    for (i in visible) {
+                        val r = state.pageRect(i)
+                        val visLeft = max(0f, -r.left).toInt()
+                        val visTop = max(0f, -r.top).toInt()
+                        val visRight = min(r.width, state.viewport.width - r.left).toInt()
+                        val visBottom = min(r.height, state.viewport.height - r.top).toInt()
+                        if (visRight - visLeft < 2 || visBottom - visTop < 2) continue
+                        val fullW = r.width.roundToInt()
+                        val fullH = r.height.roundToInt()
+                        val bmp: Bitmap = session.renderTile(i, fullW, fullH, visLeft, visTop, visRight, visBottom, version) ?: continue
+                        tiles[i] = TileBitmap(version, fullW, visLeft, visTop, bmp.asImageBitmap())
                     }
                 }
         }

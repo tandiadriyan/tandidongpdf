@@ -82,6 +82,12 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
     val version = session.version
 
     LaunchedEffect(version) { c.onVersion(version) }
+    // Preload link areas for visible pages so the first tap on a link works.
+    LaunchedEffect(version) {
+        androidx.compose.runtime.snapshotFlow { c.viewer.visiblePages() }.collect { pages ->
+            for (p in pages) c.loadLinks(p)
+        }
+    }
     DisposableEffect(c) { onDispose { c.readAloud.pause() } }
 
     // ---------------------------------------------------------------- launchers

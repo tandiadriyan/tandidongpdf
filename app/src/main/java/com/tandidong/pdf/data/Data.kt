@@ -229,10 +229,19 @@ object FileUtil {
 
     @Throws(IOException::class)
     fun writeToUri(context: Context, file: File, uri: Uri) {
-        val out = context.contentResolver.openOutputStream(uri, "wt") ?: context.contentResolver.openOutputStream(uri, "w")
+        // Prefer truncate mode; some providers reject "wt" (throwing) but truncate on "w".
+        val out = try { context.contentResolver.openOutputStream(uri, "wt") } catch (e: Exception) { null }
+            ?: context.contentResolver.openOutputStream(uri, "w")
             ?: throw IOException("Cannot write to $uri")
         out.use { o -> file.inputStream().use { it.copyTo(o) } }
     }
+
+    /** Opens [uri] for writing, truncating where the provider supports it. */
+    @Throws(IOException::class)
+    fun openOutput(context: Context, uri: Uri): java.io.OutputStream =
+        (try { context.contentResolver.openOutputStream(uri, "wt") } catch (e: Exception) { null })
+            ?: context.contentResolver.openOutputStream(uri, "w")
+            ?: throw IOException("Cannot write to $uri")
 
     fun takePersistable(context: Context, uri: Uri) {
         if (uri.scheme != ContentResolver.SCHEME_CONTENT) return

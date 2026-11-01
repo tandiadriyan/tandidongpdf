@@ -211,7 +211,21 @@ private fun CommentsPanel(c: DocumentController) {
 @Composable
 private fun FieldsPanel(c: DocumentController) {
     val fields = c.editor.formFields
-    Text("Form fields (${fields.size})", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 16.dp))
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Form fields (${fields.size})", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        if (fields.isNotEmpty() && !c.session.restricted) {
+            TextButton(onClick = {
+                c.launchJob {
+                    try {
+                        c.session.edit("Clearing form…") { com.tandidong.pdf.core.Forms.reset(it) }
+                        c.vm.message("Form cleared")
+                    } catch (e: Exception) {
+                        c.vm.message("Couldn't clear form: ${e.message}")
+                    }
+                }
+            }) { Text("Clear form") }
+        }
+    }
     if (fields.isEmpty()) {
         Text("This document has no fillable form fields. Use the Text, Date and Check tools to fill it.", modifier = Modifier.padding(16.dp))
     } else {

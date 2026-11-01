@@ -246,18 +246,18 @@ object Exporter {
     suspend fun text(context: Context, session: DocumentSession, uri: Uri) {
         val pages = session.allText()
         withContext(Dispatchers.IO) {
-            context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+            FileUtil.openOutput(context, uri).use { out ->
                 out.write(pages.joinToString("\n\n") { it.text }.toByteArray(Charsets.UTF_8))
-            } ?: throw IOException("Cannot write file")
+            }
         }
     }
 
     suspend fun docx(context: Context, session: DocumentSession, uri: Uri) {
         val pages = session.allText { done, total -> session.progress = done.toFloat() / total }
         withContext(Dispatchers.IO) {
-            context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+            FileUtil.openOutput(context, uri).use { out ->
                 DocxWriter.write(pages, out, FileUtil.baseName(session.displayName))
-            } ?: throw IOException("Cannot write file")
+            }
         }
     }
 }

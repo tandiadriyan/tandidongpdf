@@ -113,6 +113,7 @@ class DocumentController(
         editor.selection = null
         editor.selectedAnnot = null
         links = emptyMap()
+        linkLoading.clear()
         editor.searchResults = emptyList()
         editor.searchIndex = -1
         if (editor.tool == Tool.ERASER || editor.tool == Tool.SELECT || panel == Panel.COMMENTS) loadAnnotations()
@@ -145,11 +146,17 @@ class DocumentController(
         scope.launch { pageText(page) }
     }
 
+    private val linkLoading = HashSet<Int>()
+
     fun loadLinks(page: Int) {
-        if (links.containsKey(page)) return
+        if (links.containsKey(page) || !linkLoading.add(page)) return
         scope.launch {
-            val l = session.links(page)
-            links = links + (page to l)
+            try {
+                val l = session.links(page)
+                links = links + (page to l)
+            } finally {
+                linkLoading.remove(page)
+            }
         }
     }
 
