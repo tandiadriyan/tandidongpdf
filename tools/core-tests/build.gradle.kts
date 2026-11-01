@@ -11,6 +11,8 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk15to18:1.72")
     implementation("org.bouncycastle:bcpkix-jdk15to18:1.72")
     testImplementation("junit:junit:4.13.2")
+    // Reads exported .xlsx/.pptx files back to prove Office apps can open them.
+    testImplementation("org.apache.poi:poi-ooxml:5.2.5")
     testImplementation(kotlin("test-junit"))
 }
 

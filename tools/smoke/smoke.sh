@@ -71,9 +71,23 @@ check_crash() {
     exit 1
   fi
 }
+# Dismisses system "isn't responding" dialogs (e.g. a slow launcher right after boot).
+dismiss_system() {
+  for _ in 1 2 3 4; do
+    dump
+    if find_el "*isn't responding*" >/dev/null; then
+      echo "Dismissing a system 'not responding' dialog"
+      if c=$(find_el "Wait"); then adb shell input tap $c; else adb shell input keyevent 4; fi
+      sleep 3
+    else
+      return 0
+    fi
+  done
+}
 # Returns to the document's main toolbar (closing tools, dialogs and sheets).
 ensure_main() {
   for _ in 1 2 3 4 5; do
+    dismiss_system
     dump
     if find_el "Comment" >/dev/null && find_el "Tools" >/dev/null; then return 0; fi
     if c=$(find_el "OK"); then adb shell input tap $c; sleep 2; continue; fi
@@ -98,12 +112,20 @@ SIZE=$(adb shell wm size | grep -oE '[0-9]+x[0-9]+' | tail -n1)
 W=${SIZE%x*}; H=${SIZE#*x}
 echo "Screen ${W}x${H}"
 
-# 1. Launch and open the sample document
+# 1. Launch and open the sample document (retrying if the freshly booted system is sluggish)
+sleep 5
+dismiss_system
 adb shell am start -W -n $PKG/.MainActivity >/dev/null
-sleep 4; shot 00-home; check_crash "launch"
-adb shell am start -W -a android.intent.action.VIEW -d "file:///data/data/$PKG/files/inbox/sample.pdf" -t application/pdf -n $PKG/.MainActivity >/dev/null
-sleep 8; shot 01-opened; check_crash "open document"
-has "sample.pdf" || { echo "::error::Document did not open"; exit 1; }
+sleep 4; dismiss_system; shot 00-home; check_crash "launch"
+OPENED=0
+for attempt in 1 2 3; do
+  adb shell am start -W -a android.intent.action.VIEW -d "file:///data/data/$PKG/files/inbox/sample.pdf" -t application/pdf -n $PKG/.MainActivity >/dev/null
+  sleep 8; dismiss_system; check_crash "open document"
+  if has "sample.pdf"; then OPENED=1; break; fi
+  echo "Document not visible yet (attempt $attempt)"
+done
+shot 01-opened
+[ "$OPENED" = 1 ] || { echo "::error::Document did not open"; exit 1; }
 
 # 2. Scroll, double-tap zoom in and out
 adb shell input swipe $((W/2)) $((H*3/4)) $((W/2)) $((H/4)) 300; sleep 2

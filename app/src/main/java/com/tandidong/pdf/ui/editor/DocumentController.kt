@@ -79,10 +79,11 @@ sealed interface DocDialog {
     data class NewLink(val page: Int, val rect: FRect) : DocDialog
     data class LinkActions(val page: Int, val at: Pt, val link: PageLink) : DocDialog
     data object Background : DocDialog
+    data class Reply(val info: AnnotationInfo) : DocDialog
     data class FieldProperties(val field: FormField) : DocDialog
 }
 
-enum class Panel { BOOKMARKS, COMMENTS, FIELDS, SIGNATURES, ATTACHMENTS }
+enum class Panel { BOOKMARKS, COMMENTS, FIELDS, SIGNATURES, ATTACHMENTS, THUMBNAILS }
 
 /** All editor logic for one open document; survives navigation to other screens. */
 @Stable
@@ -245,6 +246,20 @@ class DocumentController(
                 vm.message(if (n > 0) "Link removed" else "No editable link here")
             } catch (e: Exception) {
                 vm.message("Couldn't remove the link: ${e.message}")
+            }
+        }
+    }
+
+    fun replyToComment(info: AnnotationInfo, text: String) {
+        if (text.isBlank()) return
+        scope.launch {
+            try {
+                val ok = session.edit("Replying…") { com.tandidong.pdf.core.AnnotationEditor.reply(it, info.pageIndex, info.index, text.trim(), author) }
+                if (!ok) vm.message("Couldn't reply to this comment")
+                loadAnnotations()
+                panel = Panel.COMMENTS
+            } catch (e: Exception) {
+                vm.message("Couldn't reply: ${e.message}")
             }
         }
     }
@@ -526,8 +541,37 @@ class DocumentController(
 
     // ------------------------------------------------------------------ ViewerInput
 
+    /** 0 = dragging the selection's start handle, 1 = its end handle, -1 = none. */
+    private var selectionHandle = -1
+
+    /** Display-space anchor points of the selection handles (start bottom-left, end bottom-right). */
+    fun selectionHandles(): Pair<Pt, Pt>? {
+        val rects = selectionRects()
+        if (rects.isEmpty()) return null
+        val first = rects.first()
+        val last = rects.last()
+        return Pt(first.x0, first.y1) to Pt(last.x1, last.y1)
+    }
+
+    private fun handleAt(hit: PageHit): Int {
+        val sel = editor.selection ?: return -1
+        if (sel.page != hit.page) return -1
+        val (a, b) = selectionHandles() ?: return -1
+        val r = handleRadius() * 1.2f
+        // Handles hang below the text: test around the knob, slightly under the anchor.
+        val knob = 9f / max(0.01f, viewer.scale)
+        val da = hypot(hit.pt.x - a.x, hit.pt.y - (a.y + knob))
+        val db = hypot(hit.pt.x - b.x, hit.pt.y - (b.y + knob))
+        return when {
+            da <= r && da <= db -> 0
+            db <= r -> 1
+            else -> -1
+        }
+    }
+
     override fun wantsDrag(hit: PageHit?): Boolean {
         if (hit == null) return false
+        if (editor.selection != null && handleAt(hit) >= 0) return true
         val t = editor.tool
         if (t == Tool.SELECT) {
             val sel = editor.selectedAnnot ?: return false
@@ -548,6 +592,8 @@ class DocumentController(
 
     override fun onDragStart(hit: PageHit) {
         dragStart = hit
+        selectionHandle = if (editor.selection != null) handleAt(hit) else -1
+        if (selectionHandle >= 0) return
         val t = editor.tool
         when {
             t.needsText -> prefetchText(hit.page)
@@ -571,6 +617,18 @@ class DocumentController(
     override fun onDrag(hit: PageHit) {
         val start = dragStart ?: return
         val page = start.page
+        if (selectionHandle >= 0) {
+            val sel = editor.selection ?: return
+            val text = editor.pageTexts[sel.page] ?: return
+            // The finger sits below the handle; aim a little above it.
+            val lift = 12f / max(0.01f, viewer.scale)
+            val j = text.nearestCharIndex(hit.pt.x, hit.pt.y - lift)
+            if (j >= 0) {
+                val fixed = if (selectionHandle == 0) sel.end - 1 else sel.start
+                editor.selection = TextSelection(sel.page, fixed, j)
+            }
+            return
+        }
         val t = editor.tool
         when {
             t.isMarkup || t == Tool.REDACT_TEXT -> {
@@ -631,6 +689,11 @@ class DocumentController(
     }
 
     override fun onDragEnd() {
+        if (selectionHandle >= 0) {
+            selectionHandle = -1
+            dragStart = null
+            return
+        }
         val t = editor.tool
         when {
             t == Tool.REDACT_AREA || t == Tool.REDACT_TEXT -> {
@@ -724,6 +787,7 @@ class DocumentController(
     }
 
     override fun onDragCancel() {
+        selectionHandle = -1
         editor.active = null
         editor.activeRedact = emptyList()
         editor.whiteoutRect = null

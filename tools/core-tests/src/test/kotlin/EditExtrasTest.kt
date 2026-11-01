@@ -190,4 +190,29 @@ class EditExtrasTest {
             }
         }
     }
+
+    @Test
+    fun commentRepliesFormThreads() {
+        PDDocument().use { doc ->
+            TestPdfs.addTextPage(doc, listOf("Draft"))
+            com.tandidong.pdf.core.AnnotationWriter("Ana", FontSelector(noUnicodeFont)).add(doc, listOf(
+                com.tandidong.pdf.core.AnnotationSpec.Note(0, com.tandidong.pdf.core.Pt(100f, 100f), "Is this final?", 0xFFFFEB3B.toInt()),
+            ))
+            val parent = com.tandidong.pdf.core.AnnotationEditor.list(doc).single()
+            assertTrue(com.tandidong.pdf.core.AnnotationEditor.reply(doc, 0, parent.index, "Not yet", "Ben"))
+            PDDocument.load(doc.toBytes()).use { d ->
+                val all = com.tandidong.pdf.core.AnnotationEditor.list(d)
+                assertEquals(2, all.size)
+                val reply = all.single { it.replyTo != null }
+                assertEquals("Not yet", reply.contents)
+                assertEquals("Ben", reply.author)
+                assertEquals(all.single { it.replyTo == null }.index, reply.replyTo)
+                // The reply draws nothing: the page looks the same with or without it.
+                val withReply = PDFRenderer(d).renderImage(0, 1f, ImageType.RGB)
+                assertTrue(com.tandidong.pdf.core.AnnotationEditor.delete(d, 0, all.single { it.replyTo == null }.index))
+                assertEquals(0, com.tandidong.pdf.core.AnnotationEditor.list(d).size, "deleting a comment removes its thread")
+                check(withReply.width > 0)
+            }
+        }
+    }
 }

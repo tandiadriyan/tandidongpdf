@@ -1,6 +1,16 @@
 package com.tandidong.pdf.ui.editor
 
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.border
+import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +25,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -119,8 +130,51 @@ fun DocPanel(
             Panel.FIELDS -> FieldsPanel(c)
             Panel.SIGNATURES -> SignaturesPanel(c)
             Panel.ATTACHMENTS -> AttachmentsPanel(c, onAddAttachment, onOpenAttachment, onSaveAttachment)
+            Panel.THUMBNAILS -> ThumbnailsPanel(c)
         }
     }
+}
+
+@Composable
+private fun ThumbnailsPanel(c: DocumentController) {
+    val session = c.session
+    val version = session.version
+    val current = c.viewer.currentPage()
+    val thumbs = remember(version) { androidx.compose.runtime.mutableStateMapOf<Int, androidx.compose.ui.graphics.ImageBitmap>() }
+    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState(initialFirstVisibleItemIndex = current)
+    Text("Pages (${session.pageCount})", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 16.dp))
+    androidx.compose.foundation.lazy.grid.LazyVerticalGrid(
+        columns = androidx.compose.foundation.lazy.grid.GridCells.Adaptive(104.dp),
+        state = gridState,
+        modifier = Modifier.heightIn(max = 600.dp).padding(horizontal = 8.dp),
+    ) {
+        items(session.pageCount) { i ->
+            LaunchedEffect(i, version) {
+                if (!thumbs.containsKey(i)) session.renderPage(i, 220, version)?.let { thumbs[i] = it.asImageBitmap() }
+            }
+            val geo = session.geometries.getOrNull(i)
+            val aspect = if (geo != null && geo.displayHeight > 0f) geo.displayWidth / geo.displayHeight else 0.75f
+            Column(
+                Modifier.padding(6.dp).clip(RoundedCornerShape(6.dp)).clickable {
+                    c.panel = null
+                    c.viewer.scrollToPage(i)
+                }.semantics(mergeDescendants = true) { contentDescription = "Go to page ${i + 1}" },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    Modifier.fillMaxWidth().aspectRatio(aspect.coerceIn(0.3f, 3f))
+                        .border(if (i == current) 3.dp else 1.dp,
+                            if (i == current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                            RoundedCornerShape(4.dp))
+                        .background(Color.White),
+                ) {
+                    thumbs[i]?.let { Image(it, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize()) }
+                }
+                Text("${i + 1}", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 2.dp))
+            }
+        }
+    }
+    Spacer(Modifier.height(24.dp))
 }
 
 @Composable
@@ -246,24 +300,45 @@ private fun BookmarkRow(c: DocumentController, e: OutlineEntry) {
 @Composable
 private fun CommentsPanel(c: DocumentController) {
     val list = c.editor.annotations
-    Text("Comments (${list.size})", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 16.dp))
+    // Threads: each top-level comment followed by its replies (any depth), in page order.
+    val byParent = list.filter { it.replyTo != null }.groupBy { it.pageIndex to it.replyTo }
+    val ordered = ArrayList<Pair<com.tandidong.pdf.core.AnnotationInfo, Int>>()
+    fun addThread(a: com.tandidong.pdf.core.AnnotationInfo, depth: Int) {
+        if (depth > 8) return
+        ordered.add(a to depth)
+        for (r in byParent[a.pageIndex to a.index].orEmpty()) addThread(r, depth + 1)
+    }
+    for (a in list.filter { it.replyTo == null }) addThread(a, 0)
+    val topLevel = list.count { it.replyTo == null }
+    Text("Comments ($topLevel)", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 16.dp))
     if (list.isEmpty()) {
         Text("No comments or markups in this document.", modifier = Modifier.padding(16.dp))
     } else {
         LazyColumn(Modifier.heightIn(max = 560.dp)) {
-            items(list) { a ->
+            items(ordered) { (a, depth) ->
                 ListItem(
-                    modifier = Modifier.clickable {
+                    modifier = Modifier.padding(start = (depth * 28).dp).clickable {
                         c.viewer.reveal(a.pageIndex, a.displayRect)
                         c.panel = null
                     },
-                    leadingContent = { Icon(Icons.Outlined.ChatBubbleOutline, null) },
+                    leadingContent = {
+                        Icon(if (depth > 0) Icons.AutoMirrored.Outlined.Reply else Icons.Outlined.ChatBubbleOutline, null)
+                    },
                     headlineContent = { Text(a.contents?.takeIf { it.isNotBlank() } ?: a.subtype, maxLines = 3, overflow = TextOverflow.Ellipsis) },
                     supportingContent = {
-                        Text(listOfNotNull("Page ${a.pageIndex + 1}", a.subtype, a.author?.takeIf { it.isNotBlank() }).joinToString(" · "))
+                        val who = a.author?.takeIf { it.isNotBlank() }
+                        Text(
+                            if (depth > 0) listOfNotNull(who, "reply").joinToString(" · ")
+                            else listOfNotNull("Page ${a.pageIndex + 1}", a.subtype, who).joinToString(" · ")
+                        )
                     },
                     trailingContent = {
-                        if (!c.session.restricted) IconButton(onClick = { c.deleteAnnotation(a) }) { Icon(Icons.Outlined.Delete, "Delete") }
+                        if (!c.session.restricted) {
+                            Row {
+                                IconButton(onClick = { c.dialog = DocDialog.Reply(a) }) { Icon(Icons.AutoMirrored.Outlined.Reply, "Reply") }
+                                IconButton(onClick = { c.deleteAnnotation(a) }) { Icon(Icons.Outlined.Delete, "Delete") }
+                            }
+                        }
                     },
                 )
             }

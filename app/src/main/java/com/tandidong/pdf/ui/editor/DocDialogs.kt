@@ -104,6 +104,8 @@ fun DocDialogs(
     onSaveThenClose: () -> Unit,
     onDiscardClose: () -> Unit,
     onImportDigitalId: (then: DocDialog?) -> Unit = {},
+    onExportXlsx: () -> Unit = {},
+    onExportPptx: () -> Unit = {},
 ) {
     val d = c.dialog ?: return
     val dismiss = { c.dialog = null }
@@ -121,6 +123,12 @@ fun DocDialogs(
             dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
         )
         DocDialog.Background -> BackgroundDialog(c, dismiss)
+        is DocDialog.Reply -> TextInputDialog(
+            "Reply to ${d.info.author?.takeIf { it.isNotBlank() } ?: "comment"}", "", label = d.info.contents?.take(80) ?: "",
+            multiline = true, onDismiss = dismiss,
+        ) { t ->
+            dismiss(); c.replyToComment(d.info, t)
+        }
         is DocDialog.FieldProperties -> FieldPropertiesDialog(c, d, dismiss)
         is DocDialog.SignedWarning -> ConfirmDialog(
             "This document is digitally signed",
@@ -180,7 +188,7 @@ fun DocDialogs(
             val p = t.toIntOrNull()
             if (p != null && p in 1..c.session.pageCount) { dismiss(); c.viewer.scrollToPage(p - 1) } else c.vm.message("Enter a page between 1 and ${c.session.pageCount}")
         }
-        DocDialog.Export -> ExportDialog(dismiss, onExportText, onExportDocx, onExportImages, onExportPdf)
+        DocDialog.Export -> ExportDialog(dismiss, onExportText, onExportDocx, onExportImages, onExportPdf, onExportXlsx, onExportPptx)
         DocDialog.Ocr -> OcrDialog(c, dismiss)
         DocDialog.Flatten -> ConfirmDialog(
             "Flatten document?",
@@ -1024,6 +1032,8 @@ private fun ExportDialog(
     onDocx: () -> Unit,
     onImages: (Boolean, Int) -> Unit,
     onPdf: () -> Unit,
+    onXlsx: () -> Unit,
+    onPptx: () -> Unit,
 ) {
     var png by remember { mutableStateOf(false) }
     var dpi by remember { mutableStateOf(150) }
@@ -1033,6 +1043,8 @@ private fun ExportDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(onClick = { dismiss(); onDocx() }, modifier = Modifier.fillMaxWidth()) { Text("Microsoft Word (.docx)") }
+                OutlinedButton(onClick = { dismiss(); onXlsx() }, modifier = Modifier.fillMaxWidth()) { Text("Microsoft Excel (.xlsx)") }
+                OutlinedButton(onClick = { dismiss(); onPptx() }, modifier = Modifier.fillMaxWidth()) { Text("Microsoft PowerPoint (.pptx)") }
                 OutlinedButton(onClick = { dismiss(); onText() }, modifier = Modifier.fillMaxWidth()) { Text("Plain text (.txt)") }
                 OutlinedButton(onClick = { dismiss(); onPdf() }, modifier = Modifier.fillMaxWidth()) { Text("PDF (share)") }
                 HorizontalDivider(Modifier.padding(vertical = 4.dp))

@@ -110,6 +110,13 @@ fun DrawScope.drawOverlay(c: DocumentController, page: Int) {
     e.selection?.let { sel ->
         if (sel.page == page) {
             for (r in c.selectionRects()) drawRect(Color(0x552962FF), r.tl(), r.sz())
+            c.selectionHandles()?.let { (a, b) ->
+                val knob = 9f * px
+                for (h in listOf(a, b)) {
+                    drawLine(Color(0xFF2962FF), Offset(h.x, h.y), Offset(h.x, h.y + knob), strokeWidth = 2f * px)
+                    drawCircle(Color(0xFF2962FF), knob, Offset(h.x, h.y + knob))
+                }
+            }
         }
     }
 

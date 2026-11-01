@@ -31,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -125,6 +126,22 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
     ) { uri ->
         if (uri != null) scope.launch {
             try { session.task("Exporting to Word…") { Exporter.docx(context, session, uri) }; vm.message("Word document exported") }
+            catch (e: Exception) { vm.message("Export failed: ${e.message}") }
+        }
+    }
+    val xlsxLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    ) { uri ->
+        if (uri != null) scope.launch {
+            try { session.task("Exporting to Excel…") { Exporter.xlsx(context, session, uri) }; vm.message("Excel workbook exported") }
+            catch (e: Exception) { vm.message("Export failed: ${e.message}") }
+        }
+    }
+    val pptxLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    ) { uri ->
+        if (uri != null) scope.launch {
+            try { session.task("Exporting to PowerPoint…") { Exporter.pptx(context, session, uri) }; vm.message("PowerPoint deck exported") }
             catch (e: Exception) { vm.message("Export failed: ${e.message}") }
         }
     }
@@ -367,6 +384,7 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                                     Text(
                                         "Page ${c.viewer.currentPage() + 1} of ${session.pageCount}" + if (session.restricted) " · Read-only" else "",
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.clickable { c.panel = Panel.THUMBNAILS },
                                     )
                                 }
                             },
@@ -391,6 +409,7 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                                         MenuRow("Print", Icons.Outlined.Print) { moreMenu = false; print() }
                                         HorizontalDivider()
                                         MenuRow("Go to page", Icons.Outlined.Pages) { moreMenu = false; c.dialog = DocDialog.GoToPage }
+                                        MenuRow("Page thumbnails", Icons.Outlined.GridView) { moreMenu = false; c.panel = Panel.THUMBNAILS }
                                         MenuRow("Bookmarks", Icons.Outlined.Bookmarks) { moreMenu = false; c.panel = Panel.BOOKMARKS }
                                         MenuRow("Comments list", Icons.Outlined.ChatBubbleOutline) { moreMenu = false; c.loadAnnotations(); c.panel = Panel.COMMENTS }
                                         MenuRow("Attachments", Icons.Outlined.AttachFile) { moreMenu = false; c.loadAttachments(); c.panel = Panel.ATTACHMENTS }
@@ -442,7 +461,8 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                 }
                 if (!c.chrome && editor.category == null) {
                     Surface(
-                        Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 8.dp),
+                        Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 8.dp)
+                            .clip(RoundedCornerShape(50)).clickable { c.panel = Panel.THUMBNAILS },
                         shape = RoundedCornerShape(50), color = Color(0x99000000),
                     ) {
                         Text("${c.viewer.currentPage() + 1} / ${session.pageCount}", color = Color.White,
@@ -527,6 +547,8 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
         onExportPdf = { share() },
         onSaveThenClose = { save { vm.back() } },
         onDiscardClose = { vm.back() },
+        onExportXlsx = { xlsxLauncher.launch(FileUtil.baseName(session.displayName) + ".xlsx") },
+        onExportPptx = { pptxLauncher.launch(FileUtil.baseName(session.displayName) + ".pptx") },
         onImportDigitalId = { then ->
             importThen = then
             idPicker.launch(arrayOf("application/x-pkcs12", "application/pkcs12", "application/octet-stream", "*/*"))
@@ -812,6 +834,7 @@ private fun AnnotationBar(c: DocumentController, a: com.tandidong.pdf.core.Annot
                 Text(a.subtype, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 8.dp))
                 IconButton(onClick = { colors = !colors }) { Icon(Icons.Outlined.Palette, "Color") }
                 IconButton(onClick = { c.dialog = DocDialog.EditComment(a) }) { Icon(Icons.Outlined.EditNote, "Edit note") }
+                IconButton(onClick = { c.dialog = DocDialog.Reply(a) }) { Icon(Icons.AutoMirrored.Outlined.Reply, "Reply") }
                 IconButton(onClick = { c.deleteAnnotation(a) }) { Icon(Icons.Outlined.Delete, "Delete") }
                 IconButton(onClick = { c.editor.selectedAnnot = null }) { Icon(Icons.Outlined.Close, "Deselect") }
             }

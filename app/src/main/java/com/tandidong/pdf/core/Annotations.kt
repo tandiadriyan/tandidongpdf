@@ -84,6 +84,8 @@ data class AnnotationInfo(
     val argb: Int?,
     val modified: String?,
     val id: String?,
+    /** Index (same page) of the comment this one replies to. */
+    val replyTo: Int? = null,
 )
 
 /** Builds annotations with explicit appearance streams so every viewer renders them identically. */
@@ -648,7 +650,9 @@ object AnnotationEditor {
                 val r = a.rectangle ?: continue
                 val author = (a as? PDAnnotationMarkup)?.titlePopup
                 val mod = try { a.modifiedDate } catch (e: Exception) { null }
-                out.add(AnnotationInfo(pi, i, st, g.rectToDisplay(FRect.of(r)), a.contents, author, Appearances.argbOf(a), mod, a.annotationName))
+                val irt = a.cosObject.getDictionaryObject(IRT)
+                val parent = if (irt != null) annots.indexOfFirst { it.cosObject === irt }.takeIf { it >= 0 } else null
+                out.add(AnnotationInfo(pi, i, st, g.rectToDisplay(FRect.of(r)), a.contents, author, Appearances.argbOf(a), mod, a.annotationName, parent))
             }
         }
         return out
@@ -663,9 +667,50 @@ object AnnotationEditor {
 
     fun delete(doc: PDDocument, pageIndex: Int, index: Int): Boolean {
         val (page, a) = annotAt(doc, pageIndex, index) ?: return false
-        val popup = a.cosObject.getDictionaryObject(COSName.getPDFName("Popup"))
-        val list = page.annotations.filter { it.cosObject !== a.cosObject && it.cosObject !== popup }
-        page.annotations = list
+        // Remove the comment, its popup, and the whole reply thread below it.
+        val doomed = HashSet<Any>()
+        doomed.add(a.cosObject)
+        val all = page.annotations
+        var grew = true
+        while (grew) {
+            grew = false
+            for (x in all) {
+                if (x.cosObject in doomed) continue
+                val irt = x.cosObject.getDictionaryObject(IRT)
+                if (irt != null && irt in doomed) { doomed.add(x.cosObject); grew = true }
+            }
+        }
+        val popups = all.filter { it.cosObject in doomed }.mapNotNull { it.cosObject.getDictionaryObject(COSName.getPDFName("Popup")) }.toSet()
+        page.annotations = all.filter { it.cosObject !in doomed && it.cosObject !in popups }
+        return true
+    }
+
+    private val IRT = COSName.getPDFName("IRT")
+
+    /** Adds a reply to the comment at [index]; replies draw nothing on the page. */
+    fun reply(doc: PDDocument, pageIndex: Int, index: Int, text: String, author: String): Boolean {
+        val (page, parent) = annotAt(doc, pageIndex, index) ?: return false
+        val reply = com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationText()
+        val r = parent.rectangle ?: return false
+        reply.rectangle = com.tom_roush.pdfbox.pdmodel.common.PDRectangle(r.lowerLeftX, r.lowerLeftY, r.width, r.height)
+        reply.contents = text
+        reply.titlePopup = author
+        reply.setInReplyTo(parent)
+        reply.replyType = "R"
+        val now = java.util.GregorianCalendar()
+        reply.setCreationDate(now)
+        reply.setModifiedDate(now)
+        reply.annotationName = java.util.UUID.randomUUID().toString()
+        reply.isNoZoom = true
+        reply.isNoRotate = true
+        // An empty appearance keeps viewers from drawing a second note icon.
+        val ap = com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAppearanceStream(doc)
+        ap.bBox = com.tom_roush.pdfbox.pdmodel.common.PDRectangle(0f, 0f, 1f, 1f)
+        val dict = com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAppearanceDictionary()
+        dict.setNormalAppearance(ap)
+        reply.appearance = dict
+        reply.page = page
+        page.annotations = page.annotations + reply
         return true
     }
 

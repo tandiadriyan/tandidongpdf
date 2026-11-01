@@ -430,7 +430,15 @@ fun OrganizeScreen(vm: AppViewModel, session: DocumentSession) {
             },
         )
     }
-    if (splitDialog) SplitDialog(session.pageCount, onDismiss = { splitDialog = false }) { ranges ->
+    var bookmarkRanges by remember { mutableStateOf<List<List<Int>>?>(null) }
+    LaunchedEffect(splitDialog, session.version) {
+        if (splitDialog) bookmarkRanges = try {
+            session.read { PageOps.bookmarkRanges(com.tandidong.pdf.core.Outline.read(it), it.numberOfPages) }
+        } catch (e: Exception) {
+            null
+        }
+    }
+    if (splitDialog) SplitDialog(session.pageCount, bookmarkRanges, onDismiss = { splitDialog = false }) { ranges ->
         splitDialog = false
         splitRanges = ranges
         splitLauncher.launch(null)
@@ -509,7 +517,7 @@ private fun PageThumb(
 }
 
 @Composable
-private fun SplitDialog(pageCount: Int, onDismiss: () -> Unit, onSplit: (List<List<Int>>) -> Unit) {
+private fun SplitDialog(pageCount: Int, bookmarkRanges: List<List<Int>>?, onDismiss: () -> Unit, onSplit: (List<List<Int>>) -> Unit) {
     var mode by remember { mutableStateOf(0) }
     var n by remember { mutableStateOf("1") }
     var ranges by remember { mutableStateOf("") }
@@ -527,12 +535,21 @@ private fun SplitDialog(pageCount: Int, onDismiss: () -> Unit, onSplit: (List<Li
                     RadioButton(selected = mode == 1, onClick = { mode = 1 }); Text("Custom ranges")
                 }
                 if (mode == 1) OutlinedTextField(value = ranges, onValueChange = { ranges = it }, label = { Text("e.g. 1-3, 4-6, 7-") }, singleLine = true)
+                if (bookmarkRanges != null) {
+                    Row(Modifier.fillMaxWidth().clickable { mode = 2 }, verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = mode == 2, onClick = { mode = 2 }); Text("At top-level bookmarks (${bookmarkRanges.size} files)")
+                    }
+                }
                 Text("Each part is saved as a separate PDF in the folder you choose.", style = MaterialTheme.typography.bodySmall)
             }
         },
         confirmButton = {
             TextButton(onClick = {
-                val r = if (mode == 0) PageOps.everyN(pageCount, n.toIntOrNull() ?: 1) else PageOps.parseRanges(ranges, pageCount)
+                val r = when (mode) {
+                    0 -> PageOps.everyN(pageCount, n.toIntOrNull() ?: 1)
+                    2 -> bookmarkRanges
+                    else -> PageOps.parseRanges(ranges, pageCount)
+                }
                 if (r != null && r.isNotEmpty()) onSplit(r)
             }) { Text("Choose folder") }
         },

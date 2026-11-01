@@ -136,6 +136,20 @@ object PageOps {
         }
 
     /** Ranges for "split every N pages". */
+    /**
+     * Page ranges that start at each top-level bookmark (in page order); pages before the first
+     * bookmark belong to the first part. Null when there are fewer than two distinct starts.
+     */
+    fun bookmarkRanges(entries: List<OutlineEntry>, pageCount: Int): List<List<Int>>? {
+        val starts = entries.mapNotNull { it.pageIndex }.filter { it in 0 until pageCount }.distinct().sorted()
+        if (starts.size < 2) return null
+        val firsts = listOf(0) + starts.drop(1)
+        return firsts.mapIndexed { k, start ->
+            val end = if (k + 1 < firsts.size) firsts[k + 1] - 1 else pageCount - 1
+            (start..end).toList()
+        }
+    }
+
     fun everyN(pageCount: Int, n: Int): List<List<Int>> =
         (0 until pageCount).chunked(n.coerceAtLeast(1))
 

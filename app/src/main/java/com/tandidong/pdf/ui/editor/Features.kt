@@ -252,6 +252,41 @@ object Exporter {
         }
     }
 
+    /** Excel workbook: one sheet per page, rows and columns recovered from the text layout. */
+    suspend fun xlsx(context: Context, session: DocumentSession, uri: Uri) {
+        val pages = session.allText { done, total -> session.progress = done.toFloat() / total }
+        withContext(Dispatchers.IO) {
+            val sheets = pages.mapIndexed { i, p -> "Page ${i + 1}" to com.tandidong.pdf.core.TableDetector.cells(p) }
+                .filter { it.second.isNotEmpty() }
+                .ifEmpty { listOf("Page 1" to emptyList()) }
+            FileUtil.openOutput(context, uri).use { out -> com.tandidong.pdf.core.XlsxWriter.write(sheets, out) }
+        }
+    }
+
+    /** PowerPoint deck: each page becomes a picture slide. */
+    suspend fun pptx(context: Context, session: DocumentSession, uri: Uri) {
+        val slides = ArrayList<com.tandidong.pdf.core.SlideImage>()
+        val n = session.pageCount
+        for (p in 0 until n) {
+            val g = session.geometries.getOrNull(p) ?: continue
+            // ~150 dpi keeps slides sharp without huge files.
+            val width = (g.displayWidth * 150f / 72f).toInt().coerceIn(400, 2400)
+            val bmp = session.renderPage(p, width, session.version) ?: continue
+            val bytes = withContext(Dispatchers.Default) {
+                val out = java.io.ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.JPEG, 88, out)
+                out.toByteArray()
+            }
+            bmp.recycle()
+            slides.add(com.tandidong.pdf.core.SlideImage(bytes, false, g.displayWidth, g.displayHeight))
+            session.progress = (p + 1).toFloat() / n
+        }
+        if (slides.isEmpty()) throw IOException("No pages could be rendered")
+        withContext(Dispatchers.IO) {
+            FileUtil.openOutput(context, uri).use { out -> com.tandidong.pdf.core.PptxWriter.write(slides, out, FileUtil.baseName(session.displayName)) }
+        }
+    }
+
     suspend fun docx(context: Context, session: DocumentSession, uri: Uri) {
         val pages = session.allText { done, total -> session.progress = done.toFloat() / total }
         withContext(Dispatchers.IO) {
