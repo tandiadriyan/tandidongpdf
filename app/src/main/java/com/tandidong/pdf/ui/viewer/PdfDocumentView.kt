@@ -3,7 +3,7 @@ package com.tandidong.pdf.ui.viewer
 import android.graphics.Bitmap
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VectorConverter
-import androidx.compose.animation.core.splineBasedDecay
+import androidx.compose.animation.splineBasedDecay
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -177,7 +177,8 @@ fun PdfDocumentView(
                         var lockPage: Int? = downHit?.page
                         val deadline = down.uptimeMillis + viewConfiguration.longPressTimeoutMillis
                         while (true) {
-                            val event = if (mode == 0) {
+                            // Drawing tools never turn into long-presses: a resting finger may start a stroke.
+                            val event = if (mode == 0 && !toolDrag) {
                                 withTimeoutOrNull(max(1L, deadlineRemaining(deadline))) { awaitPointerEvent() }
                             } else awaitPointerEvent()
                             if (event == null) {
@@ -244,10 +245,9 @@ fun PdfDocumentView(
                                         state.scrollBy(-(pos.x - lastPos.x), -(pos.y - lastPos.y))
                                     }
                                 }
-                                1, 3 -> {
-                                    mode = 1
-                                    state.scrollBy(-(pos.x - lastPos.x), -(pos.y - lastPos.y))
-                                }
+                                1 -> state.scrollBy(-(pos.x - lastPos.x), -(pos.y - lastPos.y))
+                                // Back to one finger after a pinch: re-anchor without jumping.
+                                3 -> mode = 1
                                 2 -> state.hit(pos, lockPage)?.let { currentInput.onDrag(it) }
                                 4 -> state.hit(pos, lockPage)?.let { currentInput.onLongPressDrag(it) }
                             }
