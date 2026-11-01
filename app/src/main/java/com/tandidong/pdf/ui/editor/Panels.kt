@@ -48,7 +48,8 @@ enum class MoreAction(val label: String) {
     EXPORT("Export"), OCR("Recognize text"), WATERMARK("Text watermark"), IMAGE_WATERMARK("Image watermark"),
     HEADER_FOOTER("Headers & page numbers"), FLATTEN("Flatten"), SANITIZE("Sanitize"), PROPERTIES("Properties"),
     READ_ALOUD("Read aloud"), REFLOW("Liquid mode"), BOOKMARKS("Bookmarks"), COMMENTS("Comments list"),
-    FIELDS("Form fields"), COMPARE("Compare files"), PRINT("Print"), SHARE("Share"),
+    FIELDS("Form fields"), PREPARE_FORM("Prepare form"), DIGITAL_SIGN("Digital signature"), SIGNATURES("Signatures"),
+    COMPARE("Compare files"), PRINT("Print"), SHARE("Share"),
 }
 
 private fun moreIcon(a: MoreAction): ImageVector = when (a) {
@@ -69,6 +70,9 @@ private fun moreIcon(a: MoreAction): ImageVector = when (a) {
     MoreAction.BOOKMARKS -> Icons.Outlined.Bookmarks
     MoreAction.COMMENTS -> Icons.Outlined.ChatBubbleOutline
     MoreAction.FIELDS -> Icons.Outlined.CheckBox
+    MoreAction.SIGNATURES -> Icons.Outlined.VerifiedUser
+    MoreAction.PREPARE_FORM -> Icons.Outlined.DynamicForm
+    MoreAction.DIGITAL_SIGN -> Icons.Outlined.HistoryEdu
     MoreAction.COMPARE -> Icons.Outlined.Compare
     MoreAction.PRINT -> Icons.Outlined.Print
     MoreAction.SHARE -> Icons.Outlined.Share
@@ -105,6 +109,7 @@ fun DocPanel(c: DocumentController, panel: Panel) {
             Panel.BOOKMARKS -> BookmarksPanel(c)
             Panel.COMMENTS -> CommentsPanel(c)
             Panel.FIELDS -> FieldsPanel(c)
+            Panel.SIGNATURES -> SignaturesPanel(c)
         }
     }
 }
@@ -211,6 +216,7 @@ private fun CommentsPanel(c: DocumentController) {
 @Composable
 private fun FieldsPanel(c: DocumentController) {
     val fields = c.editor.formFields
+    val preparing = c.editor.category == ToolCategory.FORMS
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("Form fields (${fields.size})", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
         if (fields.isNotEmpty() && !c.session.restricted) {
@@ -232,15 +238,17 @@ private fun FieldsPanel(c: DocumentController) {
         LazyColumn(Modifier.heightIn(max = 560.dp)) {
             items(fields) { f ->
                 ListItem(
-                    modifier = Modifier.clickable(enabled = !f.readOnly && f.kind != FieldKind.SIGNATURE && f.kind != FieldKind.BUTTON) {
+                    modifier = Modifier.clickable(enabled = preparing || (!f.readOnly && f.kind != FieldKind.BUTTON)) {
                         c.panel = null
-                        c.dialog = DocDialog.FieldEdit(f)
+                        f.widgets.firstOrNull()?.let { w -> if (w.pageIndex !in c.viewer.visiblePages()) c.viewer.scrollToPage(w.pageIndex) }
+                        if (preparing) c.dialog = DocDialog.FieldProperties(f)
+                        else c.openField(f, f.widgets.firstOrNull()?.pageIndex ?: 0)
                     },
                     headlineContent = { Text(f.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     supportingContent = {
                         val v = when (f.kind) {
                             FieldKind.CHECKBOX -> if (f.isChecked) "Checked" else "Not checked"
-                            FieldKind.SIGNATURE -> "Signature field"
+                            FieldKind.SIGNATURE -> if (f.value.isNotEmpty()) "Signed" else "Signature field · tap to sign"
                             FieldKind.BUTTON -> "Button"
                             else -> f.value.ifBlank { "Empty" }
                         }
@@ -261,3 +269,66 @@ private val unusedSize = Modifier.size(1.dp)
 
 @Suppress("unused")
 private val unusedArrangement = Arrangement.Center
+
+
+@Composable
+private fun SignaturesPanel(c: DocumentController) {
+    val list = c.signatureStatuses
+    Text("Signatures", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 16.dp))
+    when {
+        list == null -> Text("Checking signatures…", modifier = Modifier.padding(16.dp))
+        list.isEmpty() -> Text(
+            "This document has no digital signatures. Use Fill & Sign → Digital ID to sign it with a certificate.",
+            modifier = Modifier.padding(16.dp),
+        )
+        else -> LazyColumn(Modifier.heightIn(max = 600.dp)) {
+            items(list) { s ->
+                val ok = s.isValid
+                val color = when {
+                    s.error != null || !s.integrityValid -> MaterialTheme.colorScheme.error
+                    !ok || s.selfSigned || !s.coversWholeDocument -> androidx.compose.ui.graphics.Color(0xFFB26A00)
+                    else -> androidx.compose.ui.graphics.Color(0xFF2E7D32)
+                }
+                ListItem(
+                    modifier = Modifier.clickable(enabled = s.pageIndex != null) {
+                        val p = s.pageIndex ?: return@clickable
+                        val r = s.displayRect
+                        if (r != null) c.viewer.reveal(p, r) else c.viewer.scrollToPage(p)
+                        c.panel = null
+                    },
+                    leadingContent = {
+                        Icon(
+                            if (s.error != null || !s.integrityValid) Icons.Outlined.ErrorOutline
+                            else if (ok && s.coversWholeDocument && !s.selfSigned) Icons.Outlined.VerifiedUser else Icons.Outlined.WarningAmber,
+                            null, tint = color,
+                        )
+                    },
+                    headlineContent = { Text("Signed by ${s.signerName}", maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = {
+                        val df = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+                        val lines = buildList {
+                            s.signDate?.let { add("Signed ${df.format(it.time)}") }
+                            when {
+                                s.error != null -> add("Could not validate: ${s.error}")
+                                !s.integrityValid -> add("INVALID: the signed content has been altered")
+                                !s.coversWholeDocument -> add("Valid for the signed revision; the document was changed after signing")
+                                else -> add("The document has not been modified since it was signed")
+                            }
+                            if (s.error == null) {
+                                if (!s.certificateValidAtSigning) add("The certificate was not valid at signing time")
+                                add(if (s.selfSigned) "Self-signed certificate: the signer's identity isn't verified by an authority"
+                                else "Certificate issued by ${s.certificateIssuer}")
+                                s.certificateValidTo?.let { add("Certificate valid until ${java.text.DateFormat.getDateInstance().format(it)}") }
+                            }
+                            s.reason?.takeIf { it.isNotBlank() }?.let { add("Reason: $it") }
+                            s.location?.takeIf { it.isNotBlank() }?.let { add("Location: $it") }
+                            s.pageIndex?.let { add("Page ${it + 1}") }
+                        }
+                        Text(lines.joinToString("\n"))
+                    },
+                )
+            }
+        }
+    }
+    Spacer(Modifier.height(24.dp))
+}

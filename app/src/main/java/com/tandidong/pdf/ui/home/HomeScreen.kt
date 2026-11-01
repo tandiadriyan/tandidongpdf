@@ -132,6 +132,8 @@ fun HomeScreen(vm: AppViewModel) {
         HomeTool("Comment", Icons.Outlined.ChatBubbleOutline, ToolLaunch.COMMENT),
         HomeTool("Fill & Sign", Icons.Outlined.Draw, ToolLaunch.FILL_SIGN),
         HomeTool("Redact", Icons.Outlined.HideSource, ToolLaunch.REDACT),
+        HomeTool("Prepare form", Icons.Outlined.DynamicForm, ToolLaunch.PREPARE_FORM),
+        HomeTool("Digital signature", Icons.Outlined.HistoryEdu, ToolLaunch.SIGN_CERT),
         HomeTool("Organize pages", Icons.Outlined.GridView, ToolLaunch.ORGANIZE),
         HomeTool("Combine files", Icons.Outlined.MergeType, action = { vm.navigate(Screen.Combine) }),
         HomeTool("Compress", Icons.Outlined.Compress, ToolLaunch.COMPRESS),

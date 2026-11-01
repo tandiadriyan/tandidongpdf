@@ -33,6 +33,7 @@ import kotlin.coroutines.resume
 enum class ToolLaunch {
     COMMENT, FILL_SIGN, EDIT, REDACT, ORGANIZE, COMPRESS, PROTECT, EXPORT, OCR, WATERMARK,
     HEADER_FOOTER, READ_ALOUD, REFLOW, PRINT, SEARCH, BOOKMARKS, PROPERTIES, FLATTEN, SANITIZE,
+    PREPARE_FORM, SIGN_CERT,
 }
 
 sealed interface Screen {
@@ -52,6 +53,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val prefs = AppPrefs(app)
     val recents = RecentsRepository(app)
     val signatures = SignatureStore(app)
+    val digitalIds = com.tandidong.pdf.data.DigitalIdStore(app)
     val fonts = FontSelector(AndroidFontProvider)
 
     val backStack = mutableStateListOf<Screen>(Screen.Home)
@@ -179,10 +181,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (check == PdfIO.OpenCheck.CORRUPT) throw IOException("The file is damaged or is not a PDF")
         val v0 = File(dir, "v0.pdf")
         var restricted = false
+        var encrypted = false
         withContext(Dispatchers.IO) {
             val doc = PdfIO.load(original, password)
             try {
                 if (doc.isEncrypted) {
+                    encrypted = true
                     val ap = doc.currentAccessPermission
                     restricted = !ap.isOwnerPermission && !ap.canModify()
                     doc.isAllSecurityToBeRemoved = true
@@ -204,10 +208,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             firstVersion = v0,
             originalPassword = password?.takeIf { it.isNotEmpty() },
             restricted = restricted,
-            originalFile = if (restricted) original else null,
+            originalFile = if (encrypted) original else null,
+            originalWasEncrypted = encrypted,
         )
         session.init()
-        if (!restricted && original.exists() && original != v0) original.delete()
+        if (!encrypted && original.exists() && original != v0) original.delete()
         if (restricted) message("This document restricts editing. You can view, search and print it.")
         return session
     }

@@ -49,6 +49,8 @@ class DocumentSession(
     val restricted: Boolean,
     /** The untouched encrypted original, exported as-is for restricted documents. */
     private val originalFile: File?,
+    /** The opened file was encrypted (working copies are decrypted rewrites). */
+    val originalWasEncrypted: Boolean = false,
 ) {
     private val versions = ArrayList<File>().apply { add(firstVersion) }
     private var index = 0
@@ -77,6 +79,9 @@ class DocumentSession(
     var geometries by mutableStateOf<List<PageGeometry>>(emptyList())
         private set
     var lastSavedUri by mutableStateOf(sourceUri)
+    /** The current version contains digital signatures. */
+    var hasSignatures by mutableStateOf(false)
+        private set
 
     val pageCount: Int get() = geometries.size
 
@@ -107,6 +112,16 @@ class DocumentSession(
     private fun reloadInfoLocked() {
         val d = openReaderLocked()
         geometries = (0 until d.numberOfPages).map { PageGeometry.of(d.getPage(it)) }
+        hasSignatures = com.tandidong.pdf.core.DigitalSignatures.hasSignatures(d)
+    }
+
+    /**
+     * File (and password) to validate signatures against: the untouched original while the
+     * document is unmodified and was encrypted, otherwise the current version.
+     */
+    fun signatureCheckFile(): Pair<File, String?> {
+        val orig = originalFile
+        return if (index == 0 && originalWasEncrypted && orig != null && orig.exists()) orig to originalPassword else currentFile to null
     }
 
     /** Runs a read-only operation against the current version. */
@@ -285,7 +300,8 @@ class DocumentSession(
             val orig = originalFile
             if (restricted && orig != null) return@withLock orig
             val spec = protection
-            if (spec != null) {
+            // Re-encrypting rewrites the file, which would invalidate digital signatures.
+            if (spec != null && !hasSignatures) {
                 val out = File(workDir, "export-protected.pdf")
                 PdfIO.transform(currentFile, out) { Security.protect(it, spec.userPassword, spec.ownerPassword, spec.permissions) }
                 out

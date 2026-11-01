@@ -24,7 +24,7 @@ import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import java.util.concurrent.atomic.AtomicLong
 
 enum class ToolCategory(val label: String) {
-    COMMENT("Comment"), FILL_SIGN("Fill & Sign"), EDIT("Edit"), REDACT("Redact")
+    COMMENT("Comment"), FILL_SIGN("Fill & Sign"), EDIT("Edit"), REDACT("Redact"), FORMS("Prepare form")
 }
 
 enum class Tool(val label: String, val category: ToolCategory?, val dragTool: Boolean = false) {
@@ -51,13 +51,34 @@ enum class Tool(val label: String, val category: ToolCategory?, val dragTool: Bo
     SIGNATURE("Sign", ToolCategory.FILL_SIGN),
     INITIALS("Initials", ToolCategory.FILL_SIGN),
     FORM("Form fields", ToolCategory.FILL_SIGN),
+    CERT_SIGN("Digital ID", ToolCategory.FILL_SIGN, true),
     ADD_TEXT("Add text", ToolCategory.EDIT),
     EDIT_TEXT("Edit text", ToolCategory.EDIT),
     ADD_IMAGE("Add image", ToolCategory.EDIT),
     WHITEOUT("Whiteout", ToolCategory.EDIT, true),
     REDACT_AREA("Mark area", ToolCategory.REDACT, true),
     REDACT_TEXT("Mark text", ToolCategory.REDACT, true),
+    FIELD_TEXT("Text field", ToolCategory.FORMS, true),
+    FIELD_MULTILINE("Paragraph", ToolCategory.FORMS, true),
+    FIELD_CHECKBOX("Checkbox", ToolCategory.FORMS, true),
+    FIELD_RADIO("Radio button", ToolCategory.FORMS, true),
+    FIELD_DROPDOWN("Dropdown", ToolCategory.FORMS, true),
+    FIELD_LIST("List box", ToolCategory.FORMS, true),
+    FIELD_SIGNATURE("Signature field", ToolCategory.FORMS, true),
+    FIELD_EDIT("Edit fields", ToolCategory.FORMS),
     ;
+
+    val newFieldType: com.tandidong.pdf.core.NewFieldType?
+        get() = when (this) {
+            FIELD_TEXT -> com.tandidong.pdf.core.NewFieldType.TEXT
+            FIELD_MULTILINE -> com.tandidong.pdf.core.NewFieldType.MULTILINE
+            FIELD_CHECKBOX -> com.tandidong.pdf.core.NewFieldType.CHECKBOX
+            FIELD_RADIO -> com.tandidong.pdf.core.NewFieldType.RADIO
+            FIELD_DROPDOWN -> com.tandidong.pdf.core.NewFieldType.DROPDOWN
+            FIELD_LIST -> com.tandidong.pdf.core.NewFieldType.LIST
+            FIELD_SIGNATURE -> com.tandidong.pdf.core.NewFieldType.SIGNATURE
+            else -> null
+        }
 
     val isMarkup: Boolean get() = this == HIGHLIGHT || this == UNDERLINE || this == STRIKEOUT || this == SQUIGGLY
     val markupKind: MarkupKind?
@@ -164,6 +185,8 @@ class EditorState {
     var moveOffset by mutableStateOf(Pt(0f, 0f))
     var formFields by mutableStateOf<List<FormField>>(emptyList())
     var whiteoutRect by mutableStateOf<Pair<Int, FRect>?>(null)
+    var certRect by mutableStateOf<Pair<Int, FRect>?>(null)
+    var fieldRect by mutableStateOf<Pair<Int, FRect>?>(null)
     val pageTexts = mutableStateMapOf<Int, PageText>()
 
     var searchQuery by mutableStateOf("")

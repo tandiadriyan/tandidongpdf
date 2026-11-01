@@ -156,6 +156,18 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
         }
     }
 
+    var importThen by remember { mutableStateOf<DocDialog?>(null) }
+    val idPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }
+                if (bytes == null) vm.message("Couldn't read the file") else c.dialog = DocDialog.ImportDigitalId(bytes, importThen)
+            } catch (e: Exception) {
+                vm.message("Couldn't read the file: ${e.message}")
+            }
+        }
+    }
+
     fun pickImage(purpose: String) {
         imagePurpose = purpose
         imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
@@ -219,21 +231,23 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
             ToolLaunch.FILL_SIGN -> c.openCategory(ToolCategory.FILL_SIGN)
             ToolLaunch.EDIT -> c.openCategory(ToolCategory.EDIT)
             ToolLaunch.REDACT -> c.openCategory(ToolCategory.REDACT)
-            ToolLaunch.ORGANIZE -> vm.navigate(Screen.Organize(session.id))
-            ToolLaunch.COMPRESS -> c.dialog = DocDialog.Compress
+            ToolLaunch.ORGANIZE -> c.guardSigned { vm.navigate(Screen.Organize(session.id)) }
+            ToolLaunch.COMPRESS -> c.guardSigned { c.dialog = DocDialog.Compress }
             ToolLaunch.PROTECT -> c.dialog = DocDialog.Protect
             ToolLaunch.EXPORT -> c.dialog = DocDialog.Export
-            ToolLaunch.OCR -> c.dialog = DocDialog.Ocr
-            ToolLaunch.WATERMARK -> c.dialog = DocDialog.Watermark
-            ToolLaunch.HEADER_FOOTER -> c.dialog = DocDialog.HeaderFooter
+            ToolLaunch.OCR -> c.guardSigned { c.dialog = DocDialog.Ocr }
+            ToolLaunch.WATERMARK -> c.guardSigned { c.dialog = DocDialog.Watermark }
+            ToolLaunch.HEADER_FOOTER -> c.guardSigned { c.dialog = DocDialog.HeaderFooter }
             ToolLaunch.READ_ALOUD -> startReadAloud()
             ToolLaunch.REFLOW -> vm.navigate(Screen.Reflow(session.id))
             ToolLaunch.PRINT -> print()
             ToolLaunch.SEARCH -> c.searchOpen = true
             ToolLaunch.BOOKMARKS -> c.panel = Panel.BOOKMARKS
             ToolLaunch.PROPERTIES -> c.dialog = DocDialog.Properties
-            ToolLaunch.FLATTEN -> c.dialog = DocDialog.Flatten
-            ToolLaunch.SANITIZE -> c.dialog = DocDialog.Sanitize
+            ToolLaunch.FLATTEN -> c.guardSigned { c.dialog = DocDialog.Flatten }
+            ToolLaunch.SANITIZE -> c.guardSigned { c.dialog = DocDialog.Sanitize }
+            ToolLaunch.PREPARE_FORM -> c.openCategory(ToolCategory.FORMS)
+            ToolLaunch.SIGN_CERT -> c.openSigning()
         }
     }
 
@@ -319,6 +333,7 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                             modifier = Modifier.fillMaxWidth().height(2.dp),
                         )
                     }
+                    SignatureBanner(c)
                 }
             }
 
@@ -362,7 +377,10 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                         if (cat == null) {
                             MainToolbar(
                                 onCategory = { c.openCategory(it) },
-                                onPages = { if (session.restricted) vm.message("Editing is restricted") else vm.navigate(Screen.Organize(session.id)) },
+                                onPages = {
+                                    if (session.restricted) vm.message("Editing is restricted")
+                                    else c.guardSigned { vm.navigate(Screen.Organize(session.id)) }
+                                },
                                 onMore = { toolsSheet = true },
                             )
                         } else {
@@ -388,8 +406,8 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                     MoreAction.PROTECT -> handleLaunch(ToolLaunch.PROTECT)
                     MoreAction.EXPORT -> handleLaunch(ToolLaunch.EXPORT)
                     MoreAction.OCR -> handleLaunch(ToolLaunch.OCR)
-                    MoreAction.WATERMARK -> c.dialog = DocDialog.Watermark
-                    MoreAction.IMAGE_WATERMARK -> pickImage("watermark")
+                    MoreAction.WATERMARK -> c.guardSigned { c.dialog = DocDialog.Watermark }
+                    MoreAction.IMAGE_WATERMARK -> c.guardSigned { pickImage("watermark") }
                     MoreAction.HEADER_FOOTER -> handleLaunch(ToolLaunch.HEADER_FOOTER)
                     MoreAction.FLATTEN -> handleLaunch(ToolLaunch.FLATTEN)
                     MoreAction.SANITIZE -> handleLaunch(ToolLaunch.SANITIZE)
@@ -401,6 +419,9 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                     MoreAction.BOOKMARKS -> c.panel = Panel.BOOKMARKS
                     MoreAction.COMMENTS -> { c.loadAnnotations(); c.panel = Panel.COMMENTS }
                     MoreAction.FIELDS -> { c.loadFormFields(); c.panel = Panel.FIELDS }
+                    MoreAction.SIGNATURES -> { c.verifySignatures(); c.panel = Panel.SIGNATURES }
+                    MoreAction.PREPARE_FORM -> handleLaunch(ToolLaunch.PREPARE_FORM)
+                    MoreAction.DIGITAL_SIGN -> handleLaunch(ToolLaunch.SIGN_CERT)
                     MoreAction.COMPARE -> vm.navigate(Screen.Compare)
                     MoreAction.COMBINE -> vm.navigate(Screen.Combine)
                 }
@@ -417,6 +438,10 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
         onExportPdf = { share() },
         onSaveThenClose = { save { vm.back() } },
         onDiscardClose = { vm.back() },
+        onImportDigitalId = { then ->
+            importThen = then
+            idPicker.launch(arrayOf("application/x-pkcs12", "application/pkcs12", "application/octet-stream", "*/*"))
+        },
     )
     c.pendingExternalUri?.let { uri ->
         androidx.compose.material3.AlertDialog(
@@ -519,12 +544,21 @@ fun toolIcon(t: Tool): ImageVector = when (t) {
     Tool.SIGNATURE -> Icons.Outlined.Draw
     Tool.INITIALS -> Icons.Outlined.Badge
     Tool.FORM -> Icons.Outlined.CheckBox
+    Tool.CERT_SIGN -> Icons.Outlined.VerifiedUser
     Tool.ADD_TEXT -> Icons.Outlined.Title
     Tool.EDIT_TEXT -> Icons.Outlined.EditNote
     Tool.ADD_IMAGE -> Icons.Outlined.AddPhotoAlternate
     Tool.WHITEOUT -> Icons.Outlined.FormatColorFill
     Tool.REDACT_AREA -> Icons.Outlined.Rectangle
     Tool.REDACT_TEXT -> Icons.Outlined.SelectAll
+    Tool.FIELD_TEXT -> Icons.Outlined.Input
+    Tool.FIELD_MULTILINE -> Icons.Outlined.Article
+    Tool.FIELD_CHECKBOX -> Icons.Outlined.CheckBox
+    Tool.FIELD_RADIO -> Icons.Outlined.RadioButtonChecked
+    Tool.FIELD_DROPDOWN -> Icons.Outlined.ArrowDropDownCircle
+    Tool.FIELD_LIST -> Icons.Outlined.TableRows
+    Tool.FIELD_SIGNATURE -> Icons.Outlined.HistoryEdu
+    Tool.FIELD_EDIT -> Icons.Outlined.Tune
 }
 
 @Composable
@@ -546,7 +580,7 @@ private fun CategoryToolbar(c: DocumentController, cat: ToolCategory, onPickImag
                 BarButton("Redact pages", Icons.Outlined.Pages) { c.dialog = DocDialog.RedactPages }
                 BarButton("Sanitize", Icons.Outlined.CleaningServices) { c.dialog = DocDialog.Sanitize }
             }
-            if (cat == ToolCategory.FILL_SIGN && c.editor.formFields.isNotEmpty()) {
+            if ((cat == ToolCategory.FILL_SIGN || cat == ToolCategory.FORMS) && c.editor.formFields.isNotEmpty()) {
                 BarButton("Fields list", Icons.Outlined.ViewAgenda) { c.panel = Panel.FIELDS }
             }
         }
@@ -587,6 +621,11 @@ private fun ToolOptionsRow(c: DocumentController) {
             Tool.ERASER -> "Tap a comment to delete it"
             Tool.SELECT -> "Tap a comment to select; drag it to move"
             Tool.FORM -> "Tap a form field to fill it"
+            Tool.CERT_SIGN -> "Drag a box where the digital signature should appear"
+            Tool.FIELD_EDIT -> "Tap a field to rename or delete it"
+            Tool.FIELD_CHECKBOX, Tool.FIELD_RADIO -> "Tap where the ${t.label.lowercase()} should go"
+            Tool.FIELD_TEXT, Tool.FIELD_MULTILINE, Tool.FIELD_DROPDOWN, Tool.FIELD_LIST, Tool.FIELD_SIGNATURE ->
+                "Drag to draw the ${t.label.lowercase()}, or tap to place one"
             Tool.ADD_IMAGE -> "Tap the page to place the image"
             else -> ""
         }
@@ -697,5 +736,28 @@ private fun ReadAloudBar(c: DocumentController) {
             IconButton(onClick = { r.next() }) { Icon(Icons.Outlined.SkipNext, "Next page") }
             IconButton(onClick = { r.stop() }) { Icon(Icons.Outlined.Stop, "Stop") }
         }
+    }
+}
+
+
+@Composable
+private fun SignatureBanner(c: DocumentController) {
+    val list = c.signatureStatuses
+    if (list.isNullOrEmpty() || c.searchOpen) return
+    val allGood = list.all { it.isValid && it.coversWholeDocument }
+    val broken = list.any { it.error != null || !it.integrityValid }
+    val (bg, fg, text) = when {
+        broken -> Triple(Color(0xFFFFEBEE), Color(0xFFB71C1C), "At least one signature is invalid")
+        allGood -> Triple(Color(0xFFE8F5E9), Color(0xFF1B5E20),
+            if (list.size == 1) "Signed by ${list[0].signerName} · signature valid" else "Signed · all ${list.size} signatures valid")
+        else -> Triple(Color(0xFFFFF8E1), Color(0xFF8D6E00), "Signed · see signature details")
+    }
+    Row(
+        Modifier.fillMaxWidth().background(bg).clickable { c.panel = Panel.SIGNATURES }.padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(if (broken) Icons.Outlined.ErrorOutline else Icons.Outlined.VerifiedUser, null, tint = fg, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(text, color = fg, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

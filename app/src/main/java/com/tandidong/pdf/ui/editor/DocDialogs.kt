@@ -103,10 +103,25 @@ fun DocDialogs(
     onExportPdf: () -> Unit,
     onSaveThenClose: () -> Unit,
     onDiscardClose: () -> Unit,
+    onImportDigitalId: (then: DocDialog?) -> Unit = {},
 ) {
     val d = c.dialog ?: return
     val dismiss = { c.dialog = null }
     when (d) {
+        is DocDialog.CertSign -> CertSignDialog(c, d, dismiss, onImportDigitalId)
+        is DocDialog.CreateDigitalId -> CreateDigitalIdDialog(c, d, dismiss)
+        is DocDialog.ImportDigitalId -> ImportDigitalIdDialog(c, d, dismiss)
+        is DocDialog.NewFormField -> NewFormFieldDialog(c, d, dismiss)
+        is DocDialog.FieldProperties -> FieldPropertiesDialog(c, d, dismiss)
+        is DocDialog.SignedWarning -> ConfirmDialog(
+            "This document is digitally signed",
+            "Changing it (comments, fields, pages or other edits) will invalidate the existing digital signatures. " +
+                "Adding another digital signature keeps them valid. Continue?",
+            "Continue", dismiss,
+        ) {
+            dismiss()
+            d.proceed()
+        }
         is DocDialog.Note -> TextInputDialog("Add note", "", multiline = true, onDismiss = dismiss) { t ->
             dismiss(); c.addNote(d.page, d.at, t)
         }
@@ -1039,3 +1054,297 @@ private val unusedSwitch: @Composable () -> Unit = { Switch(checked = false, onC
 
 @Suppress("unused")
 private val unusedWidth = Modifier.width(1.dp)
+
+
+// ------------------------------------------------------------------ digital IDs
+
+@Composable
+private fun CertSignDialog(c: DocumentController, d: DocDialog.CertSign, dismiss: () -> Unit, onImport: (DocDialog?) -> Unit) {
+    val ids = c.vm.digitalIds.items
+    var selected by remember { mutableStateOf(ids.firstOrNull { !it.expired }?.id ?: ids.firstOrNull()?.id) }
+    var password by remember { mutableStateOf("") }
+    val reasons = listOf("I am the author of this document", "I approve this document", "I have reviewed this document", "I agree to the terms")
+    var reason by remember { mutableStateOf(reasons[1]) }
+    var location by remember { mutableStateOf("") }
+    val hasInk = c.vm.signatures.items.any { !it.initials }
+    var includeInk by remember { mutableStateOf(hasInk) }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Sign with digital ID") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()).heightIn(max = 560.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (ids.isEmpty()) {
+                    Text("You don't have a digital ID yet. Create a self-signed ID, or import one issued by a certificate authority (.p12 / .pfx).")
+                } else {
+                    for (e in ids) {
+                        Row(Modifier.fillMaxWidth().clickable { selected = e.id }, verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = selected == e.id, onClick = { selected = e.id })
+                            Column {
+                                Text(e.name, style = MaterialTheme.typography.bodyLarge)
+                                val exp = java.text.DateFormat.getDateInstance().format(java.util.Date(e.notAfter))
+                                Text(
+                                    (if (e.selfSigned) "Self-signed" else "Issued by ${e.issuer}") + " · " + (if (e.expired) "expired $exp" else "valid until $exp"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (e.expired) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = password, onValueChange = { password = it }, label = { Text("Digital ID password") }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text("Reason", style = MaterialTheme.typography.labelLarge)
+                    for (r in reasons) LabeledRadio(r, reason == r) { reason = r }
+                    OutlinedTextField(value = location, onValueChange = { location = it }, label = { Text("Location (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    if (hasInk) LabeledCheck("Include my handwritten signature", includeInk) { includeInk = it }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { c.dialog = DocDialog.CreateDigitalId(d) }) { Text("Create ID") }
+                    OutlinedButton(onClick = { dismiss(); onImport(d) }) { Text("Import .p12") }
+                }
+            }
+        },
+        confirmButton = {
+            val entry = ids.firstOrNull { it.id == selected }
+            TextButton(enabled = entry != null && password.isNotEmpty(), onClick = {
+                if (entry != null) {
+                    dismiss()
+                    c.signWithCertificate(d.page, d.rect, entry, password, reason, location, includeInk, d.fieldName)
+                }
+            }) { Text("Sign") }
+        },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun CreateDigitalIdDialog(c: DocumentController, d: DocDialog.CreateDigitalId, dismiss: () -> Unit) {
+    var name by remember { mutableStateOf(c.vm.prefs.authorName) }
+    var email by remember { mutableStateOf("") }
+    var org by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var working by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = { if (!working) dismiss() },
+        title = { Text("Create a digital ID") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("A self-signed ID proves the document wasn't changed after signing. Others can trust your identity only if they trust your certificate.",
+                    style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true)
+                OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Email (optional)") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
+                OutlinedTextField(value = org, onValueChange = { org = it }, label = { Text("Organization (optional)") }, singleLine = true)
+                OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Password (min. 6 characters)") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+                OutlinedTextField(value = confirm, onValueChange = { confirm = it }, label = { Text("Confirm password") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    isError = confirm.isNotEmpty() && confirm != password)
+                if (working) Text("Generating keys…", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !working && name.isNotBlank() && password.length >= 6 && password == confirm, onClick = {
+                working = true
+                c.launchJob {
+                    try {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                            c.vm.digitalIds.create(name.trim(), email.trim().ifBlank { null }, org.trim().ifBlank { null }, password)
+                        }
+                        c.vm.message("Digital ID created")
+                        c.dialog = d.then
+                    } catch (e: Exception) {
+                        working = false
+                        c.vm.message("Couldn't create ID: ${e.message}")
+                    }
+                }
+            }) { Text("Create") }
+        },
+        dismissButton = { TextButton(enabled = !working, onClick = { c.dialog = d.then }) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun ImportDigitalIdDialog(c: DocumentController, d: DocDialog.ImportDigitalId, dismiss: () -> Unit) {
+    var password by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Import digital ID") },
+        text = {
+            OutlinedTextField(
+                value = password, onValueChange = { password = it }, label = { Text("Password of the .p12 / .pfx file") }, singleLine = true,
+                visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                try {
+                    val e = c.vm.digitalIds.import(d.data, password)
+                    c.vm.message("Imported digital ID for ${e.name}")
+                    c.dialog = d.then
+                } catch (ex: Exception) {
+                    c.vm.message("Couldn't import: wrong password or unsupported file")
+                }
+            }) { Text("Import") }
+        },
+        dismissButton = { TextButton(onClick = { c.dialog = d.then }) { Text("Cancel") } },
+    )
+}
+
+
+// ------------------------------------------------------------------ prepare form
+
+@Composable
+private fun NewFormFieldDialog(c: DocumentController, d: DocDialog.NewFormField, dismiss: () -> Unit) {
+    val type = d.type
+    val radio = type == com.tandidong.pdf.core.NewFieldType.RADIO
+    val choice = type == com.tandidong.pdf.core.NewFieldType.DROPDOWN || type == com.tandidong.pdf.core.NewFieldType.LIST
+    val textual = type == com.tandidong.pdf.core.NewFieldType.TEXT || type == com.tandidong.pdf.core.NewFieldType.MULTILINE
+    val radioGroups = remember { c.editor.formFields.filter { it.kind == FieldKind.RADIO }.map { it.name } }
+    var name by remember { mutableStateOf("") }
+    var tooltip by remember { mutableStateOf("") }
+    var required by remember { mutableStateOf(false) }
+    var options by remember { mutableStateOf("Option 1\nOption 2\nOption 3") }
+    val lastGroup = remember { c.editor.formFields.lastOrNull { it.kind == FieldKind.RADIO } }
+    var exportValue by remember { mutableStateOf(if (radio) "Choice${(lastGroup?.widgets?.size ?: 0) + 1}" else "Yes") }
+    var fontSize by remember { mutableStateOf(0f) }
+    var defaultValue by remember { mutableStateOf("") }
+    LaunchedEffect(type) {
+        if (name.isEmpty()) {
+            name = lastGroup?.name ?: try {
+                c.session.read { com.tandidong.pdf.core.FormBuilder.suggestName(it, type) }
+            } catch (e: Exception) {
+                type.prefix + "1"
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("New ${type.label.lowercase()}") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it.replace(".", "_") }, singleLine = true,
+                    label = { Text(if (radio) "Group name" else "Field name") }, modifier = Modifier.fillMaxWidth(),
+                )
+                if (radio) {
+                    if (radioGroups.isNotEmpty()) {
+                        Text("Buttons with the same group name work together: choosing one clears the others.",
+                            style = MaterialTheme.typography.bodySmall)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (g in radioGroups.distinct()) FilterChip(selected = name == g, onClick = { name = g }, label = { Text(g) })
+                        }
+                    }
+                    OutlinedTextField(
+                        value = exportValue, onValueChange = { exportValue = it }, singleLine = true,
+                        label = { Text("Value of this button") }, modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (type == com.tandidong.pdf.core.NewFieldType.CHECKBOX) {
+                    OutlinedTextField(
+                        value = exportValue, onValueChange = { exportValue = it }, singleLine = true,
+                        label = { Text("Value when checked") }, modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (choice) {
+                    OutlinedTextField(
+                        value = options, onValueChange = { options = it }, minLines = 3,
+                        label = { Text("Choices (one per line)") }, modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (textual) {
+                    OutlinedTextField(
+                        value = defaultValue, onValueChange = { defaultValue = it }, singleLine = type == com.tandidong.pdf.core.NewFieldType.TEXT,
+                        label = { Text("Default text (optional)") }, modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (textual || choice) {
+                    Text("Font size", style = MaterialTheme.typography.labelLarge)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (s in listOf(0f, 8f, 10f, 12f, 14f, 18f)) {
+                            FilterChip(selected = fontSize == s, onClick = { fontSize = s }, label = { Text(if (s == 0f) "Auto" else "${s.toInt()}") })
+                        }
+                    }
+                }
+                if (type != com.tandidong.pdf.core.NewFieldType.SIGNATURE) {
+                    OutlinedTextField(
+                        value = tooltip, onValueChange = { tooltip = it }, singleLine = true,
+                        label = { Text("Tooltip / label (optional)") }, modifier = Modifier.fillMaxWidth(),
+                    )
+                    LabeledCheck("Required", required) { required = it }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val n = name.trim()
+                if (n.isEmpty()) { c.vm.message("Enter a field name"); return@TextButton }
+                dismiss()
+                c.addFormField(
+                    com.tandidong.pdf.core.NewField(
+                        pageIndex = d.page, rect = d.rect, type = type, name = n,
+                        options = if (choice) options.lines().map { it.trim() }.filter { it.isNotEmpty() } else emptyList(),
+                        required = required, fontSize = fontSize, defaultValue = defaultValue,
+                        exportValue = exportValue.ifBlank { "Yes" }, tooltip = tooltip.ifBlank { null },
+                    )
+                )
+            }) { Text("Add") }
+        },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun FieldPropertiesDialog(c: DocumentController, d: DocDialog.FieldProperties, dismiss: () -> Unit) {
+    val f = d.field
+    var name by remember { mutableStateOf(f.name) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (confirmDelete) {
+        ConfirmDialog("Delete field?", "\"${f.name}\" and everything typed into it will be removed.", "Delete", { confirmDelete = false }) {
+            dismiss()
+            c.deleteFormField(f)
+        }
+        return
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Field properties") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val kind = when (f.kind) {
+                    FieldKind.TEXT -> if (f.multiline) "Multi-line text" else "Text"
+                    FieldKind.CHECKBOX -> "Checkbox"
+                    FieldKind.RADIO -> "Radio group (${f.widgets.size} buttons)"
+                    FieldKind.COMBO -> "Dropdown"
+                    FieldKind.LIST -> "List box"
+                    FieldKind.SIGNATURE -> "Signature"
+                    FieldKind.BUTTON -> "Button"
+                }
+                Text("Type: $kind" + (if (f.required) " · required" else "") + if (f.readOnly) " · read-only" else "",
+                    style = MaterialTheme.typography.bodyMedium)
+                if (f.options.isNotEmpty()) Text("Choices: " + f.options.joinToString(", "), style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it.replace(".", "_") }, singleLine = true,
+                    label = { Text("Field name") }, modifier = Modifier.fillMaxWidth(),
+                    enabled = !f.name.contains('.'),
+                )
+                if (f.name.contains('.')) Text("Fields inside a group can't be renamed here.", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                dismiss()
+                if (name.trim() != f.name) c.renameFormField(f, name)
+            }) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { confirmDelete = true }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = dismiss) { Text("Cancel") }
+            }
+        },
+    )
+}

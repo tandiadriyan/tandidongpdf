@@ -35,9 +35,30 @@ fun DrawScope.drawOverlay(c: DocumentController, page: Int) {
     val e = c.editor
     val px = 1f / max(0.01f, c.viewer.scale)
 
-    if (e.formFields.isNotEmpty() && (e.category == null || e.category == ToolCategory.FILL_SIGN)) {
+    if (e.category == ToolCategory.FORMS) {
+        // Prepare form: outline every field with its name so the layout can be reviewed.
+        val labelSize = min(30f * px, 11f)
+        textPaint.textSize = labelSize
+        textPaint.color = 0xFF3949AB.toInt()
         for (f in e.formFields) {
-            if (f.readOnly) continue
+            for (w in f.widgets) {
+                if (w.pageIndex != page) continue
+                val r = w.displayRect
+                drawRect(Color(0x263949AB), r.tl(), r.sz())
+                drawRect(Color(0xFF3949AB), r.tl(), r.sz(), style = Stroke(width = 1.2f * px))
+                val label = f.name.substringAfterLast('.')
+                drawContext.canvas.nativeCanvas.drawText(label, r.x0 + 2f * px, r.y0 - 2f * px, textPaint)
+            }
+        }
+        e.fieldRect?.let { (pg, r) ->
+            if (pg == page) {
+                drawRect(Color(0x333949AB), r.tl(), r.sz())
+                drawRect(Color(0xFF3949AB), r.tl(), r.sz(), style = Stroke(1.5f * px, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f * px, 4f * px))))
+            }
+        }
+    } else if (e.formFields.isNotEmpty() && (e.category == null || e.category == ToolCategory.FILL_SIGN)) {
+        for (f in e.formFields) {
+            if (f.readOnly || (f.kind == com.tandidong.pdf.core.FieldKind.SIGNATURE && f.value.isNotEmpty())) continue
             for (w in f.widgets) {
                 if (w.pageIndex != page) continue
                 drawRect(Color(0x1F2962FF), w.displayRect.tl(), w.displayRect.sz())
@@ -68,6 +89,13 @@ fun DrawScope.drawOverlay(c: DocumentController, page: Int) {
         if (pg == page) {
             drawRect(Color.White, r.tl(), r.sz())
             drawRect(Color.Gray, r.tl(), r.sz(), style = Stroke(1.2f * px, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f * px, 4f * px))))
+        }
+    }
+
+    e.certRect?.let { (pg, r) ->
+        if (pg == page) {
+            drawRect(Color(0x1A2962FF), r.tl(), r.sz())
+            drawRect(Color(0xFF2962FF), r.tl(), r.sz(), style = Stroke(1.5f * px, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f * px, 4f * px))))
         }
     }
 

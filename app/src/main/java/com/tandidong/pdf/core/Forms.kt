@@ -88,7 +88,7 @@ object Forms {
             }
             is PDComboBox -> common(FieldKind.COMBO, field.value.firstOrNull() ?: "", field.optionsDisplayValues, field.optionsExportValues)
             is PDListBox -> common(FieldKind.LIST, field.value.joinToString(", "), field.optionsDisplayValues, field.optionsExportValues)
-            is PDSignatureField -> common(FieldKind.SIGNATURE, "", emptyList(), emptyList())
+            is PDSignatureField -> common(FieldKind.SIGNATURE, if (field.cosObject.getDictionaryObject(COSName.V) != null) "Signed" else "", emptyList(), emptyList())
             is PDPushButton -> common(FieldKind.BUTTON, "", emptyList(), emptyList())
             else -> null
         }

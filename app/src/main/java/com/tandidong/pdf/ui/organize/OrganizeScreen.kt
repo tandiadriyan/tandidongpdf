@@ -61,6 +61,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
@@ -473,20 +475,26 @@ private fun PageThumb(
             session.renderPage(item.source, 260, version)?.let { thumbs[item.source] = it.asImageBitmap() }
         }
     }
-    Column(modifier.padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) { contentDescription = "Page $number" + if (selected) ", selected" else "" }
+            .padding(6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(0.75f)
                 .clip(RoundedCornerShape(6.dp))
                 .border(if (selected) 3.dp else 1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(6.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .clickable(onClick = onClick),
+                .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center,
         ) {
             val img = if (item.isBlank) null else thumbs[item.source]
             if (item.isBlank) {
                 Box(Modifier.fillMaxSize().padding(10.dp).background(Color.White))
             } else if (img != null) {
-                Image(img, "Page $number", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(4.dp).rotate(item.rotation.toFloat()))
+                Image(img, null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(4.dp).rotate(item.rotation.toFloat()))
             }
             if (selected) {
                 Box(

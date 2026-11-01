@@ -71,9 +71,15 @@ sealed interface DocDialog {
     data object Flatten : DocDialog
     data object ConfirmClose : DocDialog
     data object ConfirmDiscardTool : DocDialog
+    data class CertSign(val page: Int, val rect: FRect, val fieldName: String? = null) : DocDialog
+    data class CreateDigitalId(val then: DocDialog?) : DocDialog
+    data class ImportDigitalId(val data: ByteArray, val then: DocDialog?) : DocDialog
+    data class SignedWarning(val proceed: () -> Unit) : DocDialog
+    data class NewFormField(val type: com.tandidong.pdf.core.NewFieldType, val page: Int, val rect: FRect) : DocDialog
+    data class FieldProperties(val field: FormField) : DocDialog
 }
 
-enum class Panel { BOOKMARKS, COMMENTS, FIELDS }
+enum class Panel { BOOKMARKS, COMMENTS, FIELDS, SIGNATURES }
 
 /** All editor logic for one open document; survives navigation to other screens. */
 @Stable
@@ -94,6 +100,8 @@ class DocumentController(
     var night by mutableStateOf(vm.prefs.nightReading)
     var links by mutableStateOf<Map<Int, List<PageLink>>>(emptyMap())
     var launchHandled = false
+    var signatureStatuses by mutableStateOf<List<com.tandidong.pdf.core.SignatureStatus>?>(null)
+    private var signedWarningAccepted = false
 
     private var loadedVersion = -1
     private var dragStart: PageHit? = null
@@ -118,6 +126,36 @@ class DocumentController(
         editor.searchIndex = -1
         if (editor.tool == Tool.ERASER || editor.tool == Tool.SELECT || panel == Panel.COMMENTS) loadAnnotations()
         loadFormFields()
+        verifySignatures()
+    }
+
+    fun verifySignatures() {
+        scope.launch {
+            if (!session.hasSignatures) {
+                signatureStatuses = emptyList()
+                return@launch
+            }
+            val (file, password) = session.signatureCheckFile()
+            signatureStatuses = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.tandidong.pdf.core.DigitalSignatures.verify(file, password)
+                }
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
+    }
+
+    /** Runs [action] after warning (once) that changes invalidate existing digital signatures. */
+    fun guardSigned(action: () -> Unit) {
+        if (session.hasSignatures && !signedWarningAccepted) {
+            dialog = DocDialog.SignedWarning {
+                signedWarningAccepted = true
+                action()
+            }
+        } else {
+            action()
+        }
     }
 
     fun loadAnnotations() {
@@ -167,13 +205,35 @@ class DocumentController(
             vm.message("Editing is restricted by the document's security settings")
             return
         }
+        if (session.hasSignatures && !signedWarningAccepted) {
+            guardSigned { openCategory(c) }
+            return
+        }
         editor.category = c
         editor.tool = Tool.NONE
         editor.selection = null
-        if (c == ToolCategory.FILL_SIGN) loadFormFields()
+        if (c == ToolCategory.FILL_SIGN || c == ToolCategory.FORMS) loadFormFields()
+        if (c == ToolCategory.FORMS) chrome = true
+    }
+
+    /** Opens Fill & Sign with the certificate (digital ID) tool selected. */
+    fun openSigning() {
+        if (session.restricted) {
+            vm.message("Signing is restricted by the document's security settings")
+            return
+        }
+        editor.category = ToolCategory.FILL_SIGN
+        editor.tool = Tool.CERT_SIGN
+        editor.selection = null
+        loadFormFields()
+        vm.message("Drag a box where the signature should appear")
     }
 
     fun selectTool(t: Tool) {
+        if (session.hasSignatures && !signedWarningAccepted && t != Tool.CERT_SIGN && t != editor.tool) {
+            guardSigned { selectTool(t) }
+            return
+        }
         editor.tool = if (editor.tool == t) Tool.NONE else t
         editor.selection = null
         editor.selectedAnnot = null
@@ -210,26 +270,74 @@ class DocumentController(
     }
 
     fun commitPending(onDone: () -> Unit = {}) {
+        if (editor.pending.isEmpty()) { onDone(); return }
+        scope.launch { if (flushPending()) onDone() }
+    }
+
+    /** Writes pending items into the document; returns false if that failed. */
+    suspend fun flushPending(): Boolean {
         val items = editor.pending.toList()
-        if (items.isEmpty()) { onDone(); return }
+        if (items.isEmpty()) return true
         editor.pending.clear()
         editor.redoStack.clear()
-        scope.launch {
-            try {
-                val writer = AnnotationWriter(author, fonts)
-                val textEditor = TextEditor(redactor(), fonts)
-                session.edit("Saving changes…") { doc ->
-                    writer.add(doc, items.mapNotNull { it.toSpec() })
-                    for (it in items) {
-                        if (it is PendingItem.TextBox && it.asContent) {
-                            textEditor.addText(doc, it.page, Pt(it.rect.x0, it.rect.y0), it.text, it.size, it.argb)
-                        }
+        return try {
+            val writer = AnnotationWriter(author, fonts)
+            val textEditor = TextEditor(redactor(), fonts)
+            session.edit("Saving changes…") { doc ->
+                writer.add(doc, items.mapNotNull { it.toSpec() })
+                for (it in items) {
+                    if (it is PendingItem.TextBox && it.asContent) {
+                        textEditor.addText(doc, it.page, Pt(it.rect.x0, it.rect.y0), it.text, it.size, it.argb)
                     }
                 }
-                onDone()
+            }
+            true
+        } catch (e: Exception) {
+            editor.pending.addAll(items)
+            vm.message("Couldn't apply changes: ${e.message}")
+            false
+        }
+    }
+
+    /** Signs with a stored digital ID (incremental update, so earlier signatures stay valid). */
+    fun signWithCertificate(
+        page: Int, rect: FRect, entry: com.tandidong.pdf.data.DigitalIdEntry, password: String,
+        reason: String, location: String, includeInk: Boolean, fieldName: String? = null,
+    ) {
+        scope.launch {
+            if (!flushPending()) return@launch
+            val id = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { vm.digitalIds.unlock(entry, password) }
             } catch (e: Exception) {
-                editor.pending.addAll(items)
-                vm.message("Couldn't apply changes: ${e.message}")
+                vm.message("Wrong password for this digital ID")
+                dialog = DocDialog.CertSign(page, rect, fieldName)
+                return@launch
+            }
+            val ink = if (includeInk) vm.signatures.items.firstOrNull { !it.initials } else null
+            val spec = com.tandidong.pdf.core.SignatureAppearanceSpec(page, rect, ink?.strokes, ink?.argb ?: 0xFF0D47A1.toInt(), ink?.aspect ?: 0f)
+            val out = vm.scratchFile("signed-${System.nanoTime()}.pdf")
+            try {
+                val input = session.currentFile
+                session.task("Signing…") {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        com.tandidong.pdf.core.DigitalSignatures.sign(
+                            input, out, id, com.tandidong.pdf.core.SignRequest(reason, location, null, spec, fieldName), fonts,
+                        )
+                    }
+                }
+                session.adopt(out, "Signing…")
+                editor.tool = Tool.NONE
+                editor.category = null
+                signedWarningAccepted = false
+                dialog = DocDialog.Info(
+                    "Document signed",
+                    "Digitally signed by ${id.commonName}.\n\nSave the document to keep the signature. Adding more digital " +
+                        "signatures keeps it valid, but any other change made afterwards will invalidate it.",
+                )
+            } catch (e: Exception) {
+                vm.message("Couldn't sign: ${e.message}")
+            } finally {
+                out.delete()
             }
         }
     }
@@ -306,6 +414,8 @@ class DocumentController(
             }
             t == Tool.REDACT_AREA -> editor.activeRedact = listOf(RedactMark(page, FRect.of(start.pt, hit.pt)))
             t == Tool.WHITEOUT -> editor.whiteoutRect = page to FRect.of(start.pt, hit.pt)
+            t == Tool.CERT_SIGN -> editor.certRect = page to FRect.of(start.pt, hit.pt)
+            t.newFieldType != null -> editor.fieldRect = page to FRect.of(start.pt, hit.pt)
             t == Tool.SELECT -> editor.moveOffset = Pt(hit.pt.x - start.pt.x, hit.pt.y - start.pt.y)
         }
     }
@@ -321,6 +431,32 @@ class DocumentController(
                 val wr = editor.whiteoutRect
                 editor.whiteoutRect = null
                 if (wr != null && wr.second.width > 2f && wr.second.height > 2f) whiteout(wr.first, wr.second)
+            }
+            t == Tool.CERT_SIGN -> {
+                val cr = editor.certRect
+                editor.certRect = null
+                if (cr != null && cr.second.width > 24f && cr.second.height > 12f) {
+                    dialog = DocDialog.CertSign(cr.first, cr.second)
+                } else {
+                    vm.message("Drag a larger box for the signature")
+                }
+            }
+            t.newFieldType != null -> {
+                val fr = editor.fieldRect
+                editor.fieldRect = null
+                val type = t.newFieldType
+                if (fr != null && type != null) {
+                    val (pg, r) = fr
+                    if (r.width < 6f || r.height < 6f) {
+                        newFieldAt(type, pg, Pt(r.centerX, r.centerY))
+                    } else {
+                        val rect = if (type == com.tandidong.pdf.core.NewFieldType.CHECKBOX || type == com.tandidong.pdf.core.NewFieldType.RADIO) {
+                            val s = min(r.width, r.height)
+                            FRect(r.x0, r.y0, r.x0 + s, r.y0 + s)
+                        } else r
+                        dialog = DocDialog.NewFormField(type, pg, clampToPage(pg, rect))
+                    }
+                }
             }
             t == Tool.SELECT -> {
                 val sel = editor.selectedAnnot
@@ -351,6 +487,8 @@ class DocumentController(
         editor.active = null
         editor.activeRedact = emptyList()
         editor.whiteoutRect = null
+        editor.certRect = null
+        editor.fieldRect = null
         editor.moveOffset = Pt(0f, 0f)
         dragStart = null
     }
@@ -392,7 +530,7 @@ class DocumentController(
             loadLinks(hit.page)
             // Form fields can be filled directly in view mode.
             fieldAt(hit)?.let { f ->
-                if (!session.restricted) dialog = DocDialog.FieldEdit(f)
+                if (!session.restricted) openField(f, hit.page)
                 return true
             }
             return false
@@ -405,7 +543,7 @@ class DocumentController(
             Tool.TEXT_BOX -> dialog = DocDialog.TextEntry(p, pt, TextPurpose.COMMENT_BOX)
             Tool.FILL_TEXT -> {
                 val f = fieldAt(hit)
-                dialog = if (f != null) DocDialog.FieldEdit(f) else DocDialog.TextEntry(p, pt, TextPurpose.FILL)
+                if (f != null) openField(f, p) else dialog = DocDialog.TextEntry(p, pt, TextPurpose.FILL)
             }
             Tool.ADD_TEXT -> dialog = DocDialog.TextEntry(p, pt, TextPurpose.CONTENT)
             Tool.FILL_DATE -> {
@@ -446,15 +584,84 @@ class DocumentController(
             Tool.SELECT -> {
                 editor.selectedAnnot = AnnotationEditor.hitTest(editor.annotations, p, pt.x, pt.y)
             }
-            Tool.FORM -> fieldAt(hit)?.let { dialog = DocDialog.FieldEdit(it) }
+            Tool.FORM -> fieldAt(hit)?.let { openField(it, p) }
+            Tool.FIELD_EDIT -> {
+                val f = fieldAt(hit)
+                if (f != null) dialog = DocDialog.FieldProperties(f) else vm.message("Tap a form field to rename or delete it")
+            }
             Tool.REDACT_AREA, Tool.REDACT_TEXT -> {
                 val mark = editor.redactions.lastOrNull { it.page == p && it.rect.contains(pt.x, pt.y) }
                 if (mark != null) editor.redactions.remove(mark)
                 else if (t == Tool.REDACT_TEXT) markWordForRedaction(p, pt)
             }
-            else -> if (t.isMarkup) markupWordAt(p, pt)
+            else -> if (t.isMarkup) markupWordAt(p, pt) else t.newFieldType?.let { newFieldAt(it, p, pt) }
         }
         return true
+    }
+
+    // ------------------------------------------------------------------ prepare form
+
+    /** Opens the new-field dialog for a default-sized field centred on [pt]. */
+    private fun newFieldAt(type: com.tandidong.pdf.core.NewFieldType, page: Int, pt: Pt) {
+        val (w, h) = when (type) {
+            com.tandidong.pdf.core.NewFieldType.TEXT -> 160f to 22f
+            com.tandidong.pdf.core.NewFieldType.MULTILINE -> 220f to 64f
+            com.tandidong.pdf.core.NewFieldType.CHECKBOX, com.tandidong.pdf.core.NewFieldType.RADIO -> 14f to 14f
+            com.tandidong.pdf.core.NewFieldType.DROPDOWN -> 150f to 22f
+            com.tandidong.pdf.core.NewFieldType.LIST -> 150f to 64f
+            com.tandidong.pdf.core.NewFieldType.SIGNATURE -> 180f to 48f
+        }
+        val r = FRect(pt.x - w / 2f, pt.y - h / 2f, pt.x + w / 2f, pt.y + h / 2f)
+        dialog = DocDialog.NewFormField(type, page, clampToPage(page, r))
+    }
+
+    /** Moves [r] inside the page bounds (display space) without resizing it when possible. */
+    private fun clampToPage(page: Int, r: FRect): FRect {
+        val geo = session.geometries.getOrNull(page) ?: return r
+        val pw = geo.displayWidth
+        val ph = geo.displayHeight
+        val w = min(r.width, pw)
+        val h = min(r.height, ph)
+        val x0 = r.x0.coerceIn(0f, max(0f, pw - w))
+        val y0 = r.y0.coerceIn(0f, max(0f, ph - h))
+        return FRect(x0, y0, x0 + w, y0 + h)
+    }
+
+    fun addFormField(field: com.tandidong.pdf.core.NewField) {
+        scope.launch {
+            try {
+                session.edit("Adding field…") { com.tandidong.pdf.core.FormBuilder.addFields(it, listOf(field)) }
+                vm.message("${field.type.label} added")
+            } catch (e: Exception) {
+                vm.message("Couldn't add the field: ${e.message}")
+            }
+        }
+    }
+
+    fun deleteFormField(f: FormField) {
+        scope.launch {
+            try {
+                val ok = session.edit("Deleting field…") { com.tandidong.pdf.core.FormBuilder.deleteField(it, f.name) }
+                vm.message(if (ok) "Field deleted" else "Couldn't delete the field")
+            } catch (e: Exception) {
+                vm.message("Couldn't delete the field: ${e.message}")
+            }
+        }
+    }
+
+    fun renameFormField(f: FormField, newName: String) {
+        val name = newName.trim()
+        if (name.isEmpty() || name == f.name) return
+        scope.launch {
+            try {
+                val taken = session.read { it.documentCatalog.acroForm?.getField(name) != null }
+                if (taken) { vm.message("A field named \"$name\" already exists"); return@launch }
+                val ok = session.edit("Renaming field…") { com.tandidong.pdf.core.FormBuilder.renameField(it, f.name, name) }
+                if (!ok) vm.message("Couldn't rename the field")
+            } catch (e: Exception) {
+                vm.message("Couldn't rename the field: ${e.message}")
+            }
+        }
     }
 
     private fun textBox(page: Int, at: Pt, text: String, size: Float, argb: Int, border: Boolean, asContent: Boolean): PendingItem.TextBox {
@@ -525,6 +732,21 @@ class DocumentController(
             val range = text.wordRangeAt(i)
             text.rectsFor(range.first, range.last + 1).forEach { editor.redactions.add(RedactMark(page, it)) }
         }
+    }
+
+    /** Fills [f], or for an empty signature field starts signing with a digital ID. */
+    fun openField(f: FormField, page: Int) {
+        if (f.kind == com.tandidong.pdf.core.FieldKind.SIGNATURE) {
+            if (f.value.isNotEmpty()) {
+                verifySignatures()
+                panel = Panel.SIGNATURES
+            } else {
+                val w = f.widgets.firstOrNull { it.pageIndex == page } ?: f.widgets.firstOrNull() ?: return
+                dialog = DocDialog.CertSign(w.pageIndex, w.displayRect, f.name)
+            }
+            return
+        }
+        dialog = DocDialog.FieldEdit(f)
     }
 
     private fun fieldAt(hit: PageHit): FormField? = editor.formFields.firstOrNull { f ->

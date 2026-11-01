@@ -7,6 +7,9 @@ val pdfboxVersion = "2.0.27"
 
 dependencies {
     implementation("org.apache.pdfbox:pdfbox:$pdfboxVersion")
+    // Same BouncyCastle artifacts PdfBox-Android depends on (used for digital signatures).
+    implementation("org.bouncycastle:bcprov-jdk15to18:1.72")
+    implementation("org.bouncycastle:bcpkix-jdk15to18:1.72")
     testImplementation("junit:junit:4.13.2")
     testImplementation(kotlin("test-junit"))
 }

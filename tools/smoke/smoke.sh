@@ -33,6 +33,35 @@ tap() {
   return 1
 }
 type_text() { adb shell input text "$(echo "$1" | sed 's/ /%s/g')"; sleep 1; }
+# Hides the soft keyboard if it is showing (BACK only closes the IME then).
+hide_kb() {
+  if adb shell dumpsys input_method | grep -q "mInputShown=true"; then adb shell input keyevent 4; sleep 1; fi
+}
+# Taps a tool in the horizontally scrolling tool bar, scrolling it left until the tool is visible.
+tap_tool() {
+  for _ in 1 2 3 4 5; do
+    dump
+    if c=$(find_el "$1"); then
+      echo "tap tool '$1' at $c"
+      adb shell input tap $c
+      sleep 2
+      return 0
+    fi
+    if y=$(find_el "Discard and close"); then
+      y=${y#* }
+      adb shell input swipe $((W*70/100)) $y $((W*20/100)) $y 400
+      sleep 1.5
+    else
+      sleep 1.5
+    fi
+  done
+  echo "::warning::Tool not found: $1"
+  shot "missing-tool-$(echo "$1" | tr -c 'a-zA-Z0-9' '_')"
+  MISSING=$((MISSING + 1))
+  return 1
+}
+# Types into the text field whose label is $1.
+fill() { tap "$1" && type_text "$2"; }
 crashed() { adb logcat -d | grep -E "FATAL EXCEPTION|ANR in $PKG" >/dev/null; }
 check_crash() {
   if crashed; then
@@ -101,7 +130,7 @@ check_crash "pen"
 
 # 5. Sticky note
 ensure_main
-tap "Comment" && tap "Note" && {
+tap "Comment" && tap_tool "Note" && {
   adb shell input tap $((W*70/100)) $((H*40/100)); sleep 2
   type_text "Smoke test note"; tap "OK"; tap "Done"; sleep 4; shot 06-note
 }
@@ -122,7 +151,7 @@ tap "Fill & Sign" && tap "Date" && {
   tap "Done"; sleep 4; shot 09-date
 }
 ensure_main
-tap "Fill & Sign" && tap "Fields list" && tap "Full name" && {
+tap "Fill & Sign" && tap_tool "Fields list" && tap "Full name" && {
   tap "Full name"; type_text "Ada Lovelace"; tap "Set"; sleep 4; shot 10-form-filled
 }
 check_crash "fill & sign"
@@ -130,7 +159,7 @@ check_crash "fill & sign"
 # 8. Edit existing text
 ensure_main
 tap "Edit" && tap "Edit text" && {
-  adb shell input tap $((W*35/100)) $((H*30/100)); sleep 3
+  adb shell input tap $((W*30/100)) $((H*21/100)); sleep 3
   shot 11-edit-text
   if has "Replace"; then tap "Replace"; sleep 4; fi
 }
@@ -140,7 +169,7 @@ check_crash "edit text"
 ensure_main
 tap "Pages" && {
   sleep 4; shot 12-organize
-  tap "1" && tap "Rotate right" && tap "Apply" && sleep 4
+  tap "Page 1" && tap "Rotate right" && tap "Apply" && sleep 4
   shot 13-organized
   adb shell input keyevent 4; sleep 2
 }
@@ -161,8 +190,8 @@ check_crash "page numbers"
 ensure_main
 tap "Search" && tap "Search in document" && {
   type_text "revenue"; adb shell input keyevent 66; sleep 4; shot 18-search
-  adb shell input keyevent 4; sleep 1
-  has "Search in document" && { adb shell input keyevent 4; sleep 1; }
+  hide_kb
+  tap "Close search"
 }
 check_crash "search"
 
@@ -171,16 +200,60 @@ ensure_main
 tap "More options" && tap "Bookmarks" && { sleep 3; shot 19-bookmarks; adb shell input keyevent 4; sleep 2; }
 check_crash "bookmarks"
 
-# 13. Leave the document (discard changes) and return home
+# 13. Prepare form: add a text field and a checkbox, then review the fields list
+ensure_main
+tap "Tools" && tap "Prepare form" && {
+  sleep 2
+  tap_tool "Text field" && {
+    adb shell input swipe $((W*15/100)) $((H*58/100)) $((W*60/100)) $((H*61/100)) 500; sleep 2
+    shot 21-new-field-dialog
+    tap "Add"; sleep 4
+  }
+  tap_tool "Checkbox" && { adb shell input tap $((W*70/100)) $((H*60/100)); sleep 2; tap "Add"; sleep 4; }
+  shot 22-form-fields
+  tap_tool "Edit fields" && { adb shell input tap $((W*35/100)) $((H*595/1000)); sleep 2; shot 23-field-properties; tap "Cancel"; }
+  tap "Done"; sleep 3
+}
+check_crash "prepare form"
+
+# 14. Digital signature: create a self-signed ID and sign
+ensure_main
+tap "Fill & Sign" && tap_tool "Digital ID" && {
+  adb shell input swipe $((W*40/100)) $((H*68/100)) $((W*85/100)) $((H*75/100)) 500; sleep 2
+  shot 24-cert-dialog
+  tap "Create ID" && {
+    fill "Name" "Smoke Tester"; hide_kb
+    fill "Password (min. 6 characters)" "secret123"; hide_kb
+    fill "Confirm password" "secret123"; hide_kb
+    shot 25-create-id
+    tap "Create"; sleep 8
+  }
+  fill "Digital ID password" "secret123"; hide_kb
+  shot 26-sign-dialog
+  tap "Sign" && { sleep 10; shot 27-signed; tap "OK"; sleep 3; }
+  if has "Signed by*"; then echo "Digital signature verified in the app banner"; else echo "::warning::No signature banner after signing"; fi
+  shot 28-signature-banner
+}
+check_crash "digital signature"
+
+# 15. Leave the document (discard changes) and return home
 ensure_main
 adb shell input keyevent 4; sleep 2
 if has "Discard"; then tap "Discard"; fi
-sleep 2; shot 20-home-after; check_crash "close"
+sleep 2; shot 30-home-after; check_crash "close"
 
-# 14. Screens that open from home
-tap "Combine files" && { sleep 2; shot 21-combine; adb shell input keyevent 4; sleep 2; }
-tap "Compare" && { sleep 2; shot 22-compare; adb shell input keyevent 4; sleep 2; }
-tap "Settings" && { sleep 2; shot 23-settings; adb shell input keyevent 4; sleep 2; }
+# 16. Screens that open from home
+ensure_home() {
+  for _ in 1 2 3 4; do
+    if has "Settings"; then return 0; fi
+    adb shell input keyevent 4; sleep 2
+    if has "Discard"; then tap "Discard"; fi
+  done
+}
+ensure_home
+tap "Combine files" && { sleep 2; shot 31-combine; adb shell input keyevent 4; sleep 2; }
+tap "Compare" && { sleep 2; shot 32-compare; adb shell input keyevent 4; sleep 2; }
+tap "Settings" && { sleep 2; shot 33-settings; adb shell input keyevent 4; sleep 2; }
 check_crash "tool screens"
 
 echo "---- render log ----"

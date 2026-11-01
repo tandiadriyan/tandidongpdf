@@ -10,6 +10,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -66,6 +68,41 @@ fun SettingsScreen(vm: AppViewModel) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             )
+            HorizontalDivider(Modifier.padding(top = 16.dp))
+            Text("Digital IDs", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp))
+            val ids = vm.digitalIds.items
+            if (ids.isEmpty()) {
+                Text(
+                    "No digital IDs yet. Create or import one from Fill & Sign → Digital ID in any document.",
+                    style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+            val context = androidx.compose.ui.platform.LocalContext.current
+            for (e in ids) {
+                ListItem(
+                    headlineContent = { Text(e.name) },
+                    supportingContent = {
+                        val exp = java.text.DateFormat.getDateInstance().format(java.util.Date(e.notAfter))
+                        Text((if (e.selfSigned) "Self-signed" else "Issued by ${e.issuer}") + " · valid until $exp")
+                    },
+                    trailingContent = {
+                        Row {
+                            IconButton(onClick = {
+                                try {
+                                    val f = java.io.File(context.cacheDir, "id-export.p12")
+                                    f.writeBytes(vm.digitalIds.exportBytes(e))
+                                    com.tandidong.pdf.data.FileUtil.share(context, f, e.name.replace(' ', '_') + ".p12", "application/x-pkcs12")
+                                } catch (ex: Exception) {
+                                    vm.message("Couldn't export: ${ex.message}")
+                                }
+                            }) { Icon(androidx.compose.material.icons.Icons.Outlined.IosShare, "Back up") }
+                            IconButton(onClick = { vm.digitalIds.delete(e); vm.message("Digital ID deleted") }) {
+                                Icon(androidx.compose.material.icons.Icons.Outlined.Delete, "Delete")
+                            }
+                        }
+                    },
+                )
+            }
             HorizontalDivider(Modifier.padding(top = 16.dp))
             Text("Storage", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp))
             ListItem(
