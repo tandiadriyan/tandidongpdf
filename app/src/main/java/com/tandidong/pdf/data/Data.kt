@@ -282,6 +282,25 @@ object FileUtil {
         context.startActivity(Intent.createChooser(send, "Share").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    /** Opens [file] in another app (falls back to the share sheet when none can view it). */
+    fun openWith(context: Context, file: File, name: String, mime: String) {
+        val uri = shareableUri(context, file, name)
+        val view = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(view)
+        } catch (e: android.content.ActivityNotFoundException) {
+            share(context, file, name, mime)
+        }
+    }
+
+    fun mimeFor(name: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+    }
+
     fun shareText(context: Context, text: String) {
         val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text) }
         context.startActivity(Intent.createChooser(send, "Share text").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

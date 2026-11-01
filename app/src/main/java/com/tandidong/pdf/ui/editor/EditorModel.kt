@@ -55,6 +55,8 @@ enum class Tool(val label: String, val category: ToolCategory?, val dragTool: Bo
     ADD_TEXT("Add text", ToolCategory.EDIT),
     EDIT_TEXT("Edit text", ToolCategory.EDIT),
     ADD_IMAGE("Add image", ToolCategory.EDIT),
+    EDIT_IMAGE("Images", ToolCategory.EDIT),
+    LINK("Link", ToolCategory.EDIT, true),
     WHITEOUT("Whiteout", ToolCategory.EDIT, true),
     REDACT_AREA("Mark area", ToolCategory.REDACT, true),
     REDACT_TEXT("Mark text", ToolCategory.REDACT, true),
@@ -187,6 +189,11 @@ class EditorState {
     var whiteoutRect by mutableStateOf<Pair<Int, FRect>?>(null)
     var certRect by mutableStateOf<Pair<Int, FRect>?>(null)
     var fieldRect by mutableStateOf<Pair<Int, FRect>?>(null)
+    var linkRect by mutableStateOf<Pair<Int, FRect>?>(null)
+    val pageImages = mutableStateMapOf<Int, List<com.tandidong.pdf.core.PlacedImage>>()
+    var selectedImage by mutableStateOf<com.tandidong.pdf.core.PlacedImage?>(null)
+    /** Live move/resize preview of the selected image (display points). */
+    var imageDrag by mutableStateOf<FRect?>(null)
     val pageTexts = mutableStateMapOf<Int, PageText>()
 
     var searchQuery by mutableStateOf("")

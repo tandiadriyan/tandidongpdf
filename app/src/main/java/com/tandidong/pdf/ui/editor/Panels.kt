@@ -49,6 +49,7 @@ enum class MoreAction(val label: String) {
     HEADER_FOOTER("Headers & page numbers"), FLATTEN("Flatten"), SANITIZE("Sanitize"), PROPERTIES("Properties"),
     READ_ALOUD("Read aloud"), REFLOW("Liquid mode"), BOOKMARKS("Bookmarks"), COMMENTS("Comments list"),
     FIELDS("Form fields"), PREPARE_FORM("Prepare form"), DIGITAL_SIGN("Digital signature"), SIGNATURES("Signatures"),
+    ATTACHMENTS("Attachments"),
     COMPARE("Compare files"), PRINT("Print"), SHARE("Share"),
 }
 
@@ -72,6 +73,7 @@ private fun moreIcon(a: MoreAction): ImageVector = when (a) {
     MoreAction.FIELDS -> Icons.Outlined.CheckBox
     MoreAction.SIGNATURES -> Icons.Outlined.VerifiedUser
     MoreAction.PREPARE_FORM -> Icons.Outlined.DynamicForm
+    MoreAction.ATTACHMENTS -> Icons.Outlined.AttachFile
     MoreAction.DIGITAL_SIGN -> Icons.Outlined.HistoryEdu
     MoreAction.COMPARE -> Icons.Outlined.Compare
     MoreAction.PRINT -> Icons.Outlined.Print
@@ -103,15 +105,72 @@ fun MoreToolsSheet(onDismiss: () -> Unit, onAction: (MoreAction) -> Unit) {
 }
 
 @Composable
-fun DocPanel(c: DocumentController, panel: Panel) {
+fun DocPanel(
+    c: DocumentController,
+    panel: Panel,
+    onAddAttachment: () -> Unit = {},
+    onOpenAttachment: (com.tandidong.pdf.core.AttachmentInfo) -> Unit = {},
+    onSaveAttachment: (com.tandidong.pdf.core.AttachmentInfo) -> Unit = {},
+) {
     ModalBottomSheet(onDismissRequest = { c.panel = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)) {
         when (panel) {
             Panel.BOOKMARKS -> BookmarksPanel(c)
             Panel.COMMENTS -> CommentsPanel(c)
             Panel.FIELDS -> FieldsPanel(c)
             Panel.SIGNATURES -> SignaturesPanel(c)
+            Panel.ATTACHMENTS -> AttachmentsPanel(c, onAddAttachment, onOpenAttachment, onSaveAttachment)
         }
     }
+}
+
+@Composable
+private fun AttachmentsPanel(
+    c: DocumentController,
+    onAdd: () -> Unit,
+    onOpen: (com.tandidong.pdf.core.AttachmentInfo) -> Unit,
+    onSave: (com.tandidong.pdf.core.AttachmentInfo) -> Unit,
+) {
+    val list = c.attachments
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Attachments (${list.size})", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        if (!c.session.restricted) {
+            TextButton(onClick = { c.guardSigned(onAdd) }) {
+                Icon(Icons.Outlined.AttachFile, null)
+                Text(" Add file")
+            }
+        }
+    }
+    if (list.isEmpty()) {
+        Text("No files are attached to this document. Attach spreadsheets, images or other files to keep them with the PDF.",
+            modifier = Modifier.padding(16.dp))
+    } else {
+        LazyColumn(Modifier.heightIn(max = 560.dp)) {
+            items(list) { a ->
+                ListItem(
+                    modifier = Modifier.clickable { onOpen(a) },
+                    leadingContent = { Icon(Icons.Outlined.Description, null) },
+                    headlineContent = { Text(a.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = {
+                        val parts = listOfNotNull(
+                            com.tandidong.pdf.data.FileUtil.formatSize(a.size).takeIf { a.size > 0 },
+                            a.pageIndex?.let { "comment on page ${it + 1}" },
+                            a.description?.takeIf { it.isNotBlank() },
+                        )
+                        Text(parts.joinToString(" · "), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    },
+                    trailingContent = {
+                        Row {
+                            IconButton(onClick = { onSave(a) }) { Icon(Icons.Outlined.Download, "Save attachment") }
+                            if (!c.session.restricted) {
+                                IconButton(onClick = { c.guardSigned { c.deleteAttachment(a) } }) { Icon(Icons.Outlined.Delete, "Remove attachment") }
+                            }
+                        }
+                    },
+                )
+            }
+        }
+    }
+    Spacer(Modifier.height(24.dp))
 }
 
 @Composable

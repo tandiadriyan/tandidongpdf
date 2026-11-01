@@ -85,7 +85,10 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
     // Preload link areas for visible pages so the first tap on a link works.
     LaunchedEffect(version) {
         androidx.compose.runtime.snapshotFlow { c.viewer.visiblePages() }.collect { pages ->
-            for (p in pages) c.loadLinks(p)
+            for (p in pages) {
+                c.loadLinks(p)
+                if (c.editor.tool == Tool.EDIT_IMAGE) c.loadImages(p)
+            }
         }
     }
     DisposableEffect(c) { onDispose { c.readAloud.pause() } }
@@ -147,6 +150,9 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
             if (imagePurpose == "watermark") {
                 c.pendingWatermarkImage = bmp
                 c.dialog = DocDialog.Watermark
+            } else if (imagePurpose == "replace") {
+                val target = editor.selectedImage
+                if (target != null) c.replaceImage(target, bmp) else vm.message("Select an image first")
             } else {
                 editor.imageToPlace = bmp
                 editor.category = ToolCategory.EDIT
@@ -164,6 +170,77 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                 if (bytes == null) vm.message("Couldn't read the file") else c.dialog = DocDialog.ImportDigitalId(bytes, importThen)
             } catch (e: Exception) {
                 vm.message("Couldn't read the file: ${e.message}")
+            }
+        }
+    }
+
+    var pendingBytes by remember { mutableStateOf<ByteArray?>(null) }
+    fun saveBytesLauncherResult(uri: Uri?) {
+        val bytes = pendingBytes
+        pendingBytes = null
+        if (uri != null && bytes != null) scope.launch {
+            try {
+                withContext(Dispatchers.IO) { FileUtil.openOutput(context, uri).use { it.write(bytes) } }
+                vm.message("Saved")
+            } catch (e: Exception) {
+                vm.message("Save failed: ${e.message}")
+            }
+        }
+    }
+    val saveJpegLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { saveBytesLauncherResult(it) }
+    val savePngLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { saveBytesLauncherResult(it) }
+    val saveAnyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { saveBytesLauncherResult(it) }
+    val attachPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            try {
+                val name = FileUtil.displayName(context, uri)
+                val mime = context.contentResolver.getType(uri)
+                val size = FileUtil.size(context, uri)
+                if (size > 50L * 1024 * 1024) { vm.message("Files larger than 50 MB can't be attached"); return@launch }
+                val bytes = withContext(Dispatchers.IO) { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }
+                if (bytes == null) vm.message("Couldn't read the file") else c.addAttachment(name, mime, bytes, null)
+            } catch (e: Exception) {
+                vm.message("Couldn't attach the file: ${e.message}")
+            }
+        }
+    }
+
+    fun saveSelectedImage() {
+        val img = editor.selectedImage ?: return
+        scope.launch {
+            val res = try { c.imageBytes(img) } catch (e: Exception) { null }
+            if (res == null) { vm.message("This image can't be saved"); return@launch }
+            pendingBytes = res.first
+            val base = FileUtil.baseName(session.displayName) + "-image-p${img.pageIndex + 1}"
+            if (res.second == "jpg") saveJpegLauncher.launch("$base.jpg") else savePngLauncher.launch("$base.png")
+        }
+    }
+
+    fun saveAttachment(a: com.tandidong.pdf.core.AttachmentInfo) {
+        scope.launch {
+            try {
+                pendingBytes = c.attachmentBytes(a)
+                saveAnyLauncher.launch(a.fileName)
+            } catch (e: Exception) {
+                vm.message("Couldn't read the attachment: ${e.message}")
+            }
+        }
+    }
+
+    fun openAttachment(a: com.tandidong.pdf.core.AttachmentInfo) {
+        scope.launch {
+            try {
+                val bytes = c.attachmentBytes(a)
+                val f = java.io.File(context.cacheDir, "attachment.bin")
+                withContext(Dispatchers.IO) { f.writeBytes(bytes) }
+                val mime = a.mimeType?.takeIf { it.contains('/') && it != "application/octet-stream" } ?: FileUtil.mimeFor(a.fileName)
+                if (mime == "application/pdf") {
+                    vm.openGenerated(f, a.fileName, null)
+                } else {
+                    FileUtil.openWith(context, f, a.fileName, mime)
+                }
+            } catch (e: Exception) {
+                vm.message("Couldn't open the attachment: ${e.message}")
             }
         }
     }
@@ -316,6 +393,7 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                                         MenuRow("Go to page", Icons.Outlined.Pages) { moreMenu = false; c.dialog = DocDialog.GoToPage }
                                         MenuRow("Bookmarks", Icons.Outlined.Bookmarks) { moreMenu = false; c.panel = Panel.BOOKMARKS }
                                         MenuRow("Comments list", Icons.Outlined.ChatBubbleOutline) { moreMenu = false; c.loadAnnotations(); c.panel = Panel.COMMENTS }
+                                        MenuRow("Attachments", Icons.Outlined.AttachFile) { moreMenu = false; c.loadAttachments(); c.panel = Panel.ATTACHMENTS }
                                         MenuRow(if (c.night) "Day mode" else "Night mode", if (c.night) Icons.Outlined.LightMode else Icons.Outlined.DarkMode) {
                                             moreMenu = false; c.night = !c.night
                                         }
@@ -350,6 +428,9 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                 Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     if (editor.selection != null) SelectionBar(c)
                     editor.selectedAnnot?.let { AnnotationBar(c, it) }
+                    if (editor.tool == Tool.EDIT_IMAGE) editor.selectedImage?.let { img ->
+                        ImageBar(c, img, onReplace = { pickImage("replace") }, onSave = { saveSelectedImage() })
+                    }
                     if (c.readAloud.active) ReadAloudBar(c)
                     if (editor.category == ToolCategory.REDACT && editor.redactions.isNotEmpty()) {
                         FilledTonalButton(onClick = { c.dialog = DocDialog.ApplyRedactions }) {
@@ -421,6 +502,7 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                     MoreAction.FIELDS -> { c.loadFormFields(); c.panel = Panel.FIELDS }
                     MoreAction.SIGNATURES -> { c.verifySignatures(); c.panel = Panel.SIGNATURES }
                     MoreAction.PREPARE_FORM -> handleLaunch(ToolLaunch.PREPARE_FORM)
+                    MoreAction.ATTACHMENTS -> { c.loadAttachments(); c.panel = Panel.ATTACHMENTS }
                     MoreAction.DIGITAL_SIGN -> handleLaunch(ToolLaunch.SIGN_CERT)
                     MoreAction.COMPARE -> vm.navigate(Screen.Compare)
                     MoreAction.COMBINE -> vm.navigate(Screen.Combine)
@@ -429,7 +511,14 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
         )
     }
 
-    c.panel?.let { p -> DocPanel(c, p) }
+    c.panel?.let { p ->
+        DocPanel(
+            c, p,
+            onAddAttachment = { attachPicker.launch(arrayOf("*/*")) },
+            onOpenAttachment = { openAttachment(it) },
+            onSaveAttachment = { saveAttachment(it) },
+        )
+    }
     DocDialogs(
         c = c,
         onExportText = { textLauncher.launch(FileUtil.baseName(session.displayName) + ".txt") },
@@ -551,6 +640,8 @@ fun toolIcon(t: Tool): ImageVector = when (t) {
     Tool.WHITEOUT -> Icons.Outlined.FormatColorFill
     Tool.REDACT_AREA -> Icons.Outlined.Rectangle
     Tool.REDACT_TEXT -> Icons.Outlined.SelectAll
+    Tool.EDIT_IMAGE -> Icons.Outlined.Image
+    Tool.LINK -> Icons.Outlined.Link
     Tool.FIELD_TEXT -> Icons.Outlined.Input
     Tool.FIELD_MULTILINE -> Icons.Outlined.Article
     Tool.FIELD_CHECKBOX -> Icons.Outlined.CheckBox
@@ -574,6 +665,9 @@ private fun CategoryToolbar(c: DocumentController, cat: ToolCategory, onPickImag
                 BarButton(t.label, toolIcon(t), selected = e.tool == t) {
                     if (t == Tool.ADD_IMAGE) onPickImage() else c.selectTool(t)
                 }
+            }
+            if (cat == ToolCategory.EDIT) {
+                BarButton("Background", Icons.Outlined.Wallpaper) { c.dialog = DocDialog.Background }
             }
             if (cat == ToolCategory.REDACT) {
                 BarButton("Search & redact", Icons.Outlined.FindInPage) { c.dialog = DocDialog.SearchRedact }
@@ -623,6 +717,8 @@ private fun ToolOptionsRow(c: DocumentController) {
             Tool.FORM -> "Tap a form field to fill it"
             Tool.CERT_SIGN -> "Drag a box where the digital signature should appear"
             Tool.FIELD_EDIT -> "Tap a field to rename or delete it"
+            Tool.EDIT_IMAGE -> "Tap an image to select it, drag to move, drag a corner to resize"
+            Tool.LINK -> "Drag a box to add a link; tap a link to remove it"
             Tool.FIELD_CHECKBOX, Tool.FIELD_RADIO -> "Tap where the ${t.label.lowercase()} should go"
             Tool.FIELD_TEXT, Tool.FIELD_MULTILINE, Tool.FIELD_DROPDOWN, Tool.FIELD_LIST, Tool.FIELD_SIGNATURE ->
                 "Drag to draw the ${t.label.lowercase()}, or tap to place one"
@@ -719,6 +815,19 @@ private fun AnnotationBar(c: DocumentController, a: com.tandidong.pdf.core.Annot
                 IconButton(onClick = { c.deleteAnnotation(a) }) { Icon(Icons.Outlined.Delete, "Delete") }
                 IconButton(onClick = { c.editor.selectedAnnot = null }) { Icon(Icons.Outlined.Close, "Deselect") }
             }
+        }
+    }
+}
+
+@Composable
+private fun ImageBar(c: DocumentController, img: com.tandidong.pdf.core.PlacedImage, onReplace: () -> Unit, onSave: () -> Unit) {
+    Surface(shape = RoundedCornerShape(24.dp), tonalElevation = 6.dp, shadowElevation = 6.dp, modifier = Modifier.padding(bottom = 8.dp)) {
+        Row(Modifier.padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(img.sizeLabel, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 8.dp))
+            IconButton(onClick = onReplace) { Icon(Icons.Outlined.SwapHoriz, "Replace image") }
+            IconButton(onClick = onSave, enabled = !img.inline) { Icon(Icons.Outlined.Download, "Save image") }
+            IconButton(onClick = { c.deleteImage(img) }) { Icon(Icons.Outlined.Delete, "Delete image") }
+            IconButton(onClick = { c.editor.selectedImage = null }) { Icon(Icons.Outlined.Close, "Deselect") }
         }
     }
 }

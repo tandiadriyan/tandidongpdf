@@ -67,6 +67,40 @@ fun DrawScope.drawOverlay(c: DocumentController, page: Int) {
         }
     }
 
+    if (e.tool == Tool.EDIT_IMAGE) {
+        val dash = PathEffect.dashPathEffect(floatArrayOf(5f * px, 4f * px))
+        for (img in e.pageImages[page].orEmpty()) {
+            if (img == e.selectedImage) continue
+            drawRect(Color(0xCC1E88E5), img.displayRect.tl(), img.displayRect.sz(), style = Stroke(1.2f * px, pathEffect = dash))
+        }
+        e.selectedImage?.let { sel ->
+            if (sel.pageIndex == page) {
+                val r = e.imageDrag ?: sel.displayRect
+                if (e.imageDrag != null) drawRect(Color(0x331E88E5), r.tl(), r.sz())
+                drawRect(Color(0xFF1E88E5), r.tl(), r.sz(), style = Stroke(2f * px))
+                val hr = 7f * px
+                for (corner in listOf(Offset(r.x0, r.y0), Offset(r.x1, r.y0), Offset(r.x1, r.y1), Offset(r.x0, r.y1))) {
+                    drawCircle(Color.White, hr, corner)
+                    drawCircle(Color(0xFF1E88E5), hr, corner, style = Stroke(2f * px))
+                }
+            }
+        }
+    }
+
+    if (e.tool == Tool.LINK) {
+        val dash = PathEffect.dashPathEffect(floatArrayOf(5f * px, 4f * px))
+        for (l in c.links[page].orEmpty()) {
+            drawRect(Color(0x221E88E5), l.rect.tl(), l.rect.sz())
+            drawRect(Color(0xFF1E88E5), l.rect.tl(), l.rect.sz(), style = Stroke(1.2f * px, pathEffect = dash))
+        }
+        e.linkRect?.let { (pg, r) ->
+            if (pg == page) {
+                drawRect(Color(0x331E88E5), r.tl(), r.sz())
+                drawRect(Color(0xFF1E88E5), r.tl(), r.sz(), style = Stroke(1.5f * px))
+            }
+        }
+    }
+
     e.searchResults.forEachIndexed { i, m ->
         if (m.pageIndex == page) {
             for (r in m.rects) drawRect(if (i == e.searchIndex) Color(0x99FF6D00) else Color(0x66FFD600), r.tl(), r.sz())

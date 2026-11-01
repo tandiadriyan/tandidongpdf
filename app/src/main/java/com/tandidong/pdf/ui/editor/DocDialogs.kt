@@ -112,6 +112,15 @@ fun DocDialogs(
         is DocDialog.CreateDigitalId -> CreateDigitalIdDialog(c, d, dismiss)
         is DocDialog.ImportDigitalId -> ImportDigitalIdDialog(c, d, dismiss)
         is DocDialog.NewFormField -> NewFormFieldDialog(c, d, dismiss)
+        is DocDialog.NewLink -> NewLinkDialog(c, d, dismiss)
+        is DocDialog.LinkActions -> AlertDialog(
+            onDismissRequest = dismiss,
+            title = { Text("Link") },
+            text = { Text(d.link.targetPage?.let { "Goes to page ${it + 1}" } ?: d.link.uri?.let { "Opens $it" } ?: "Link") },
+            confirmButton = { TextButton(onClick = { dismiss(); c.removeLinkAt(d.page, d.at) }) { Text("Remove link") } },
+            dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
+        )
+        DocDialog.Background -> BackgroundDialog(c, dismiss)
         is DocDialog.FieldProperties -> FieldPropertiesDialog(c, d, dismiss)
         is DocDialog.SignedWarning -> ConfirmDialog(
             "This document is digitally signed",
@@ -325,23 +334,80 @@ private fun TextEntryDialog(c: DocumentController, d: DocDialog.TextEntry, dismi
 
 @Composable
 private fun EditTextDialog(c: DocumentController, d: DocDialog.EditText, dismiss: () -> Unit) {
-    var text by remember { mutableStateOf(d.text) }
+    val para = d.paragraph
+    var wholeParagraph by remember { mutableStateOf(para != null) }
+    var text by remember { mutableStateOf(para?.text ?: d.text) }
+    var style by remember { mutableStateOf<com.tandidong.pdf.core.TextStyle?>(null) }
     var size by remember { mutableStateOf(d.line.fontSize.coerceIn(4f, 72f)) }
+    var family by remember { mutableStateOf<com.tandidong.pdf.core.FontFamily?>(null) }
+    var bold by remember { mutableStateOf<Boolean?>(null) }
+    var italic by remember { mutableStateOf<Boolean?>(null) }
+    var color by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(d) {
+        style = try { c.session.read { com.tandidong.pdf.core.TextStyles.probe(it, d.page, d.line.box) } } catch (e: Exception) { null }
+        style?.let { size = it.size.coerceIn(4f, 72f) }
+    }
     AlertDialog(
         onDismissRequest = dismiss,
         title = { Text("Edit text") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth())
-                Text("Font size: ${"%.1f".format(size)} pt")
-                Slider(value = size, onValueChange = { size = it }, valueRange = 4f..48f)
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (para != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(selected = wholeParagraph, onClick = {
+                            if (!wholeParagraph) { wholeParagraph = true; text = para.text }
+                        }, label = { Text("Paragraph (${para.lineCount} lines)") })
+                        FilterChip(selected = !wholeParagraph, onClick = {
+                            if (wholeParagraph) { wholeParagraph = false; text = d.text }
+                        }, label = { Text("This line") })
+                    }
+                }
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, modifier = Modifier.fillMaxWidth(),
+                    minLines = if (wholeParagraph) 4 else 1,
+                )
+                style?.let {
+                    Text("Original: ${it.description}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("Font", style = MaterialTheme.typography.labelLarge)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(selected = family == null, onClick = { family = null }, label = { Text("Match original") })
+                    for (f in com.tandidong.pdf.core.FontFamily.values()) {
+                        FilterChip(selected = family == f, onClick = { family = f }, label = { Text(f.label) })
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val isBold = bold ?: style?.bold ?: d.line.bold
+                    val isItalic = italic ?: style?.italic ?: false
+                    FilterChip(selected = isBold, onClick = { bold = !isBold }, label = { Text("Bold") })
+                    FilterChip(selected = isItalic, onClick = { italic = !isItalic }, label = { Text("Italic") })
+                }
+                Text("Size: ${"%.1f".format(size)} pt")
+                Slider(value = size, onValueChange = { size = it }, valueRange = 4f..72f)
+                Text("Color", style = MaterialTheme.typography.labelLarge)
+                FilterChip(selected = color == null, onClick = { color = null }, label = { Text("Original color") })
+                ColorRow(color ?: 0) { color = it }
                 Text(
-                    "The original text is permanently removed and replaced. A standard font is used for the new text.",
+                    "The original text is permanently removed and replaced. The document's own font is reused when it " +
+                        "contains every letter you type; otherwise the closest standard font is used.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
-        confirmButton = { TextButton(onClick = { dismiss(); c.replaceText(d.page, d.line, text, size) }) { Text("Replace") } },
+        confirmButton = {
+            TextButton(onClick = {
+                dismiss()
+                val p = para?.takeIf { wholeParagraph }
+                val leading = if (p != null) p.leading * size / p.fontSize.coerceAtLeast(1f) else null
+                c.replaceText(
+                    d.page, p?.rect ?: d.line.box, text,
+                    com.tandidong.pdf.core.TextFormat(
+                        size = size, argb = color, family = family, bold = bold, italic = italic,
+                        wrapWidth = p?.rect?.width, leading = leading,
+                    ),
+                )
+            }) { Text("Replace") }
+        },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
     )
 }
@@ -1346,5 +1412,89 @@ private fun FieldPropertiesDialog(c: DocumentController, d: DocDialog.FieldPrope
                 TextButton(onClick = dismiss) { Text("Cancel") }
             }
         },
+    )
+}
+
+
+// ------------------------------------------------------------------ links & background
+
+@Composable
+private fun NewLinkDialog(c: DocumentController, d: DocDialog.NewLink, dismiss: () -> Unit) {
+    var toPage by remember { mutableStateOf(false) }
+    var uri by remember { mutableStateOf("") }
+    var page by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Add link") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                LabeledRadio("Web address or email", !toPage) { toPage = false }
+                LabeledRadio("Page in this document", toPage) { toPage = true }
+                if (toPage) {
+                    OutlinedTextField(
+                        value = page, onValueChange = { page = it.filter(Char::isDigit).take(6) }, singleLine = true,
+                        label = { Text("Page (1 – ${c.session.pageCount})") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = uri, onValueChange = { uri = it }, singleLine = true, label = { Text("https://… or name@example.com") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (toPage) {
+                    val p = page.toIntOrNull()
+                    if (p == null || p !in 1..c.session.pageCount) { c.vm.message("Enter a page between 1 and ${c.session.pageCount}"); return@TextButton }
+                    dismiss(); c.addLink(d.page, d.rect, null, p - 1)
+                } else {
+                    if (uri.isBlank()) { c.vm.message("Enter a web address"); return@TextButton }
+                    dismiss(); c.addLink(d.page, d.rect, uri.trim(), null)
+                }
+            }) { Text("Add") }
+        },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
+    )
+}
+
+private val BACKGROUNDS = listOf(
+    0xFFFFF8E1.toInt(), 0xFFFFF59D.toInt(), 0xFFE3F2FD.toInt(), 0xFFE8F5E9.toInt(), 0xFFFCE4EC.toInt(),
+    0xFFF3E5F5.toInt(), 0xFFEEEEEE.toInt(), 0xFFFFE0B2.toInt(),
+)
+
+@Composable
+private fun BackgroundDialog(c: DocumentController, dismiss: () -> Unit) {
+    var color by remember { mutableStateOf(BACKGROUNDS[0]) }
+    var scope by remember { mutableStateOf(0) }
+    var range by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Page background") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Adds a color behind the page content.", style = MaterialTheme.typography.bodySmall)
+                ColorRow(color, BACKGROUNDS) { color = it }
+                LabeledRadio("All pages", scope == 0) { scope = 0 }
+                LabeledRadio("Current page (${c.viewer.currentPage() + 1})", scope == 1) { scope = 1 }
+                LabeledRadio("Pages…", scope == 2) { scope = 2 }
+                if (scope == 2) OutlinedTextField(value = range, onValueChange = { range = it }, singleLine = true, label = { Text("e.g. 1-3, 7") })
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val pages = when (scope) {
+                    0 -> (0 until c.session.pageCount).toList()
+                    1 -> listOf(c.viewer.currentPage())
+                    else -> PageOps.parseRanges(range, c.session.pageCount)?.flatten()
+                }
+                if (pages.isNullOrEmpty()) { c.vm.message("Invalid page range"); return@TextButton }
+                dismiss()
+                c.applyBackground(pages, color)
+            }) { Text("Apply") }
+        },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
     )
 }

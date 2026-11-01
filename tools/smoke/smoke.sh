@@ -200,6 +200,33 @@ ensure_main
 tap "More options" && tap "Bookmarks" && { sleep 3; shot 19-bookmarks; adb shell input keyevent 4; sleep 2; }
 check_crash "bookmarks"
 
+# 12b. Edit images (page 3 has a picture), links, background, attachments
+ensure_main
+tap "More options" && tap "Go to page" && { fill "1 – 3" "3"; hide_kb; tap "OK"; sleep 3; }
+tap "Edit" && tap_tool "Images" && {
+  adb shell input tap $((W*35/100)) $((H*24/100)); sleep 3
+  shot 20a-image-selected
+  if has "Delete image"; then
+    adb shell input swipe $((W*35/100)) $((H*24/100)) $((W*50/100)) $((H*30/100)) 600; sleep 5
+    shot 20b-image-moved
+    adb shell input tap $((W*50/100)) $((H*30/100)); sleep 3
+    tap "Delete image"; sleep 4; shot 20c-image-deleted
+  else
+    echo "::warning::No image selected on page 3"
+  fi
+  tap_tool "Link" && {
+    adb shell input swipe $((W*15/100)) $((H*45/100)) $((W*60/100)) $((H*48/100)) 500; sleep 2
+    fill "https://… or name@example.com" "example.com"; hide_kb
+    tap "Add"; sleep 4; shot 20d-link-added
+  }
+  tap_tool "Background" && { tap "Apply"; sleep 4; shot 20e-background; }
+  tap "Done"; sleep 3
+}
+check_crash "edit images and links"
+ensure_main
+tap "More options" && tap "Attachments" && { sleep 2; shot 20f-attachments; adb shell input keyevent 4; sleep 2; }
+check_crash "attachments"
+
 # 13. Prepare form: add a text field and a checkbox, then review the fields list
 ensure_main
 tap "Tools" && tap "Prepare form" && {

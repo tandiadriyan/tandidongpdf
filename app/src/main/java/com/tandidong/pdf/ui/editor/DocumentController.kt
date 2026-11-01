@@ -49,7 +49,7 @@ enum class TextPurpose { COMMENT_BOX, FILL, CONTENT }
 sealed interface DocDialog {
     data class Note(val page: Int, val at: Pt) : DocDialog
     data class TextEntry(val page: Int, val at: Pt, val purpose: TextPurpose) : DocDialog
-    data class EditText(val page: Int, val line: TextLine, val text: String) : DocDialog
+    data class EditText(val page: Int, val line: TextLine, val text: String, val paragraph: com.tandidong.pdf.core.Paragraph? = null) : DocDialog
     data class FieldEdit(val field: FormField) : DocDialog
     data class EditComment(val info: AnnotationInfo) : DocDialog
     data class Signature(val initials: Boolean, val placeAt: Pair<Int, Pt>?) : DocDialog
@@ -76,10 +76,13 @@ sealed interface DocDialog {
     data class ImportDigitalId(val data: ByteArray, val then: DocDialog?) : DocDialog
     data class SignedWarning(val proceed: () -> Unit) : DocDialog
     data class NewFormField(val type: com.tandidong.pdf.core.NewFieldType, val page: Int, val rect: FRect) : DocDialog
+    data class NewLink(val page: Int, val rect: FRect) : DocDialog
+    data class LinkActions(val page: Int, val at: Pt, val link: PageLink) : DocDialog
+    data object Background : DocDialog
     data class FieldProperties(val field: FormField) : DocDialog
 }
 
-enum class Panel { BOOKMARKS, COMMENTS, FIELDS, SIGNATURES }
+enum class Panel { BOOKMARKS, COMMENTS, FIELDS, SIGNATURES, ATTACHMENTS }
 
 /** All editor logic for one open document; survives navigation to other screens. */
 @Stable
@@ -101,6 +104,7 @@ class DocumentController(
     var links by mutableStateOf<Map<Int, List<PageLink>>>(emptyMap())
     var launchHandled = false
     var signatureStatuses by mutableStateOf<List<com.tandidong.pdf.core.SignatureStatus>?>(null)
+    var attachments by mutableStateOf<List<com.tandidong.pdf.core.AttachmentInfo>>(emptyList())
     private var signedWarningAccepted = false
 
     private var loadedVersion = -1
@@ -127,6 +131,166 @@ class DocumentController(
         if (editor.tool == Tool.ERASER || editor.tool == Tool.SELECT || panel == Panel.COMMENTS) loadAnnotations()
         loadFormFields()
         verifySignatures()
+        if (panel == Panel.ATTACHMENTS) loadAttachments()
+        editor.pageImages.clear()
+        editor.imageDrag = null
+        val rs = reselectImage
+        reselectImage = null
+        editor.selectedImage = null
+        if (editor.tool == Tool.EDIT_IMAGE) {
+            viewer.visiblePages().forEach { loadImages(it) }
+            if (rs != null) scope.launch { editor.selectedImage = imagesFor(rs.first).getOrNull(rs.second) }
+        }
+    }
+
+    // ------------------------------------------------------------------ images
+
+    private var reselectImage: Pair<Int, Int>? = null
+    private var imageDragMode = 0
+    private var imageDragStart: FRect? = null
+
+    suspend fun imagesFor(page: Int): List<com.tandidong.pdf.core.PlacedImage> {
+        editor.pageImages[page]?.let { return it }
+        val list = try {
+            session.read { com.tandidong.pdf.core.PageImages.list(it, page) }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        editor.pageImages[page] = list
+        return list
+    }
+
+    fun loadImages(page: Int) {
+        if (!editor.pageImages.containsKey(page)) scope.launch { imagesFor(page) }
+    }
+
+    private fun handleRadius(): Float = 28f / max(0.01f, viewer.scale)
+
+    fun deleteImage(img: com.tandidong.pdf.core.PlacedImage) {
+        scope.launch {
+            try {
+                val ok = session.edit("Deleting image…") { com.tandidong.pdf.core.PageImages.delete(it, img) }
+                vm.message(if (ok) "Image deleted" else "The page changed; select the image again")
+            } catch (e: Exception) {
+                vm.message("Couldn't delete the image: ${e.message}")
+            }
+        }
+    }
+
+    fun replaceImage(img: com.tandidong.pdf.core.PlacedImage, bitmap: Bitmap) {
+        scope.launch {
+            try {
+                reselectImage = img.pageIndex to img.ordinal
+                val ok = session.edit("Replacing image…") { doc ->
+                    val x = if (bitmap.hasAlpha()) com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory.createFromImage(doc, bitmap)
+                    else com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory.createFromImage(doc, bitmap, 0.9f)
+                    val done = com.tandidong.pdf.core.PageImages.replace(doc, img, x)
+                    if (done) {
+                        // Keep the new picture's proportions inside the old frame.
+                        val r = img.displayRect
+                        val aspect = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)
+                        val fitted = if (r.width / r.height > aspect) {
+                            val w = r.height * aspect
+                            FRect(r.centerX - w / 2f, r.y0, r.centerX + w / 2f, r.y1)
+                        } else {
+                            val h = r.width / aspect
+                            FRect(r.x0, r.centerY - h / 2f, r.x1, r.centerY + h / 2f)
+                        }
+                        val again = com.tandidong.pdf.core.PageImages.list(doc, img.pageIndex).getOrNull(img.ordinal)
+                        if (again != null && (abs(fitted.width - r.width) > 0.5f || abs(fitted.height - r.height) > 0.5f)) {
+                            com.tandidong.pdf.core.PageImages.transform(doc, again, fitted)
+                        }
+                    }
+                    done
+                }
+                if (!ok) { reselectImage = null; vm.message("The page changed; select the image again") }
+            } catch (e: Exception) {
+                reselectImage = null
+                vm.message("Couldn't replace the image: ${e.message}")
+            }
+        }
+    }
+
+    /** Encoded bytes and file extension of [img] for saving (JPEG as stored, otherwise PNG). */
+    suspend fun imageBytes(img: com.tandidong.pdf.core.PlacedImage): Pair<ByteArray, String>? = session.read { doc ->
+        com.tandidong.pdf.core.PageImages.rawJpeg(doc, img)?.let { return@read it to "jpg" }
+        val x = com.tandidong.pdf.core.PageImages.xobject(doc, img) ?: return@read null
+        val raster = AndroidImageCodec.decode(x) as? com.tandidong.pdf.platform.BitmapRaster ?: return@read null
+        val out = java.io.ByteArrayOutputStream()
+        raster.bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+        raster.bitmap.recycle()
+        out.toByteArray() to "png"
+    }
+
+    // ------------------------------------------------------------------ links, attachments, background
+
+    fun addLink(page: Int, rect: FRect, uri: String?, targetPage: Int?) {
+        scope.launch {
+            try {
+                session.edit("Adding link…") { doc ->
+                    if (targetPage != null) com.tandidong.pdf.core.LinkEditor.addPageLink(doc, page, rect, targetPage)
+                    else com.tandidong.pdf.core.LinkEditor.addUri(doc, page, rect, uri ?: "")
+                }
+                vm.message("Link added")
+            } catch (e: Exception) {
+                vm.message("Couldn't add the link: ${e.message}")
+            }
+        }
+    }
+
+    fun removeLinkAt(page: Int, at: Pt) {
+        scope.launch {
+            try {
+                val n = session.edit("Removing link…") { com.tandidong.pdf.core.LinkEditor.removeAt(it, page, at.x, at.y) }
+                vm.message(if (n > 0) "Link removed" else "No editable link here")
+            } catch (e: Exception) {
+                vm.message("Couldn't remove the link: ${e.message}")
+            }
+        }
+    }
+
+    fun loadAttachments() {
+        scope.launch {
+            attachments = try { session.read { com.tandidong.pdf.core.Attachments.list(it) } } catch (e: Exception) { emptyList() }
+        }
+    }
+
+    fun addAttachment(name: String, mime: String?, data: ByteArray, description: String?) {
+        scope.launch {
+            try {
+                session.edit("Attaching file…") { com.tandidong.pdf.core.Attachments.add(it, name, data, mime, description) }
+                vm.message("File attached")
+                loadAttachments()
+            } catch (e: Exception) {
+                vm.message("Couldn't attach the file: ${e.message}")
+            }
+        }
+    }
+
+    fun deleteAttachment(a: com.tandidong.pdf.core.AttachmentInfo) {
+        scope.launch {
+            try {
+                val ok = session.edit("Removing attachment…") { com.tandidong.pdf.core.Attachments.delete(it, a.key) }
+                vm.message(if (ok) "Attachment removed" else "Couldn't remove the attachment")
+                loadAttachments()
+            } catch (e: Exception) {
+                vm.message("Couldn't remove the attachment: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun attachmentBytes(a: com.tandidong.pdf.core.AttachmentInfo): ByteArray =
+        session.read { com.tandidong.pdf.core.Attachments.read(it, a.key) }
+
+    fun applyBackground(pages: List<Int>, argb: Int) {
+        scope.launch {
+            try {
+                session.edit("Adding background…") { com.tandidong.pdf.core.Stamper(fonts).background(it, pages, argb) }
+                vm.message("Background added to ${pages.size} page${if (pages.size == 1) "" else "s"}")
+            } catch (e: Exception) {
+                vm.message("Couldn't add the background: ${e.message}")
+            }
+        }
     }
 
     fun verifySignatures() {
@@ -239,6 +403,9 @@ class DocumentController(
         editor.selectedAnnot = null
         if (editor.tool == Tool.ERASER || editor.tool == Tool.SELECT) loadAnnotations()
         if (editor.tool.needsText) viewer.visiblePages().forEach { prefetchText(it) }
+        editor.selectedImage = null
+        if (editor.tool == Tool.EDIT_IMAGE) viewer.visiblePages().forEach { loadImages(it) }
+        if (editor.tool == Tool.LINK) viewer.visiblePages().forEach { loadLinks(it) }
         when (editor.tool) {
             Tool.STAMP -> if (editor.tool == t) dialog = DocDialog.StampPicker
             Tool.SIGNATURE -> if (editor.signature == null) dialog = DocDialog.Signature(false, null)
@@ -259,6 +426,8 @@ class DocumentController(
         editor.tool = Tool.NONE
         editor.category = null
         editor.selectedAnnot = null
+        editor.selectedImage = null
+        editor.imageDrag = null
     }
 
     fun requestCloseCategory() {
@@ -364,6 +533,10 @@ class DocumentController(
             val sel = editor.selectedAnnot ?: return false
             return sel.pageIndex == hit.page && sel.displayRect.outset(10f).contains(hit.pt.x, hit.pt.y)
         }
+        if (t == Tool.EDIT_IMAGE) {
+            val sel = editor.selectedImage ?: return false
+            return sel.pageIndex == hit.page && sel.displayRect.outset(handleRadius()).contains(hit.pt.x, hit.pt.y)
+        }
         return t.dragTool
     }
 
@@ -380,6 +553,17 @@ class DocumentController(
             t.needsText -> prefetchText(hit.page)
             t == Tool.PEN -> editor.active = PendingItem.Ink(hit.page, listOf(listOf(hit.pt)), vm.prefs.penColor, vm.prefs.penWidth, 1f)
             t == Tool.SELECT -> editor.moveOffset = Pt(0f, 0f)
+            t == Tool.EDIT_IMAGE -> {
+                val r = editor.selectedImage?.displayRect
+                imageDragStart = r
+                imageDragMode = 0
+                if (r != null) {
+                    val corners = listOf(Pt(r.x0, r.y0), Pt(r.x1, r.y0), Pt(r.x1, r.y1), Pt(r.x0, r.y1))
+                    val rad = handleRadius()
+                    val idx = corners.indexOfFirst { hypot(it.x - hit.pt.x, it.y - hit.pt.y) <= rad }
+                    imageDragMode = idx + 1 // 0 = move, 1..4 = corner
+                }
+            }
         }
         onDrag(hit)
     }
@@ -416,6 +600,32 @@ class DocumentController(
             t == Tool.WHITEOUT -> editor.whiteoutRect = page to FRect.of(start.pt, hit.pt)
             t == Tool.CERT_SIGN -> editor.certRect = page to FRect.of(start.pt, hit.pt)
             t.newFieldType != null -> editor.fieldRect = page to FRect.of(start.pt, hit.pt)
+            t == Tool.LINK -> editor.linkRect = page to FRect.of(start.pt, hit.pt)
+            t == Tool.EDIT_IMAGE -> {
+                val r0 = imageDragStart ?: return
+                editor.imageDrag = if (imageDragMode == 0) {
+                    r0.offset(hit.pt.x - start.pt.x, hit.pt.y - start.pt.y)
+                } else {
+                    // Resize from a corner, keeping proportions; the opposite corner stays put.
+                    val fixed = when (imageDragMode) {
+                        1 -> Pt(r0.x1, r0.y1)
+                        2 -> Pt(r0.x0, r0.y1)
+                        3 -> Pt(r0.x0, r0.y0)
+                        else -> Pt(r0.x1, r0.y0)
+                    }
+                    val sx = abs(hit.pt.x - fixed.x) / max(1f, r0.width)
+                    val sy = abs(hit.pt.y - fixed.y) / max(1f, r0.height)
+                    val sc = max(max(sx, sy), 8f / max(1f, min(r0.width, r0.height)))
+                    val w = r0.width * sc
+                    val h = r0.height * sc
+                    val left = imageDragMode == 1 || imageDragMode == 4
+                    val top = imageDragMode == 1 || imageDragMode == 2
+                    FRect(
+                        if (left) fixed.x - w else fixed.x, if (top) fixed.y - h else fixed.y,
+                        if (left) fixed.x else fixed.x + w, if (top) fixed.y else fixed.y + h,
+                    )
+                }
+            }
             t == Tool.SELECT -> editor.moveOffset = Pt(hit.pt.x - start.pt.x, hit.pt.y - start.pt.y)
         }
     }
@@ -439,6 +649,36 @@ class DocumentController(
                     dialog = DocDialog.CertSign(cr.first, cr.second)
                 } else {
                     vm.message("Drag a larger box for the signature")
+                }
+            }
+            t == Tool.LINK -> {
+                val lr = editor.linkRect
+                editor.linkRect = null
+                if (lr != null && lr.second.width > 6f && lr.second.height > 4f) dialog = DocDialog.NewLink(lr.first, lr.second)
+                else vm.message("Drag a box over the text or area to link")
+            }
+            t == Tool.EDIT_IMAGE -> {
+                val sel = editor.selectedImage
+                val target = editor.imageDrag
+                if (sel != null && target != null &&
+                    (abs(target.x0 - sel.displayRect.x0) > 0.5f || abs(target.y0 - sel.displayRect.y0) > 0.5f ||
+                        abs(target.width - sel.displayRect.width) > 0.5f)
+                ) {
+                    scope.launch {
+                        try {
+                            reselectImage = sel.pageIndex to sel.ordinal
+                            val ok = session.edit(if (imageDragMode == 0) "Moving image…" else "Resizing image…") {
+                                com.tandidong.pdf.core.PageImages.transform(it, sel, target)
+                            }
+                            if (!ok) { reselectImage = null; editor.imageDrag = null; vm.message("The page changed; select the image again") }
+                        } catch (e: Exception) {
+                            reselectImage = null
+                            editor.imageDrag = null
+                            vm.message("Couldn't move the image: ${e.message}")
+                        }
+                    }
+                } else {
+                    editor.imageDrag = null
                 }
             }
             t.newFieldType != null -> {
@@ -489,6 +729,8 @@ class DocumentController(
         editor.whiteoutRect = null
         editor.certRect = null
         editor.fieldRect = null
+        editor.linkRect = null
+        editor.imageDrag = null
         editor.moveOffset = Pt(0f, 0f)
         dragStart = null
     }
@@ -573,11 +815,13 @@ class DocumentController(
             }
             Tool.EDIT_TEXT -> scope.launch {
                 val text = pageText(p)
-                val line = text?.lines?.firstOrNull { it.box.outset(2f).contains(pt.x, pt.y) }
+                val lineIndex = text?.lines?.indexOfFirst { it.box.outset(2f).contains(pt.x, pt.y) } ?: -1
+                val line = text?.lines?.getOrNull(lineIndex)
                 if (text == null || line == null) {
                     vm.message("No text here. Use Add text to insert new text.")
                 } else {
-                    dialog = DocDialog.EditText(p, line, text.text.substring(line.start, min(line.end, text.text.length)))
+                    val para = com.tandidong.pdf.core.TextStyles.paragraphAround(text, lineIndex)?.takeIf { it.lineCount > 1 }
+                    dialog = DocDialog.EditText(p, line, text.text.substring(line.start, min(line.end, text.text.length)), para)
                 }
             }
             Tool.ERASER -> erase(hit)
@@ -585,6 +829,17 @@ class DocumentController(
                 editor.selectedAnnot = AnnotationEditor.hitTest(editor.annotations, p, pt.x, pt.y)
             }
             Tool.FORM -> fieldAt(hit)?.let { openField(it, p) }
+            Tool.EDIT_IMAGE -> scope.launch {
+                val list = imagesFor(p)
+                val img = com.tandidong.pdf.core.PageImages.hitTest(list, p, pt.x, pt.y)
+                editor.selectedImage = img
+                if (img == null) vm.message(if (list.isEmpty()) "No editable images on this page" else "Tap an image to select it")
+            }
+            Tool.LINK -> {
+                val link = links[p]?.firstOrNull { it.rect.outset(2f).contains(pt.x, pt.y) }
+                if (link != null) dialog = DocDialog.LinkActions(p, pt, link)
+                else vm.message("Drag a box to create a link")
+            }
             Tool.FIELD_EDIT -> {
                 val f = fieldAt(hit)
                 if (f != null) dialog = DocDialog.FieldProperties(f) else vm.message("Tap a form field to rename or delete it")
@@ -1010,11 +1265,14 @@ class DocumentController(
         }
     }
 
-    fun replaceText(page: Int, line: TextLine, newText: String, size: Float) {
+    fun replaceText(page: Int, area: FRect, newText: String, format: com.tandidong.pdf.core.TextFormat) {
         scope.launch {
             try {
-                session.edit("Editing text…") { doc ->
-                    TextEditor(redactor(), fonts).replace(doc, page, line.box, newText, size, vm.prefs.textColor, line.bold)
+                val res = session.edit("Editing text…") { doc ->
+                    TextEditor(redactor(), fonts).replace(doc, page, area, newText, format)
+                }
+                if (newText.isNotBlank()) {
+                    vm.message(if (res.reusedOriginalFont) "Text replaced in the original font" else "Text replaced using ${res.fontUsed}")
                 }
             } catch (e: Exception) {
                 vm.message("Couldn't edit text: ${e.message}")

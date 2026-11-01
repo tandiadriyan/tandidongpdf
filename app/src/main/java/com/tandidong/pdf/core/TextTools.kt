@@ -45,35 +45,82 @@ class OcrLayerWriter(private val fonts: FontSelector) {
 
 /** Replaces existing text: removes the original glyphs, then writes new text in place. */
 class TextEditor(private val redactor: Redactor, private val fonts: FontSelector) {
-    fun replace(doc: PDDocument, pageIndex: Int, displayRect: FRect, newText: String, fontSize: Float, argb: Int, bold: Boolean = false) {
+
+    /** What [replace] matched and used. */
+    data class ReplaceResult(val original: TextStyle?, val fontUsed: String, val reusedOriginalFont: Boolean)
+
+    fun replace(doc: PDDocument, pageIndex: Int, displayRect: FRect, newText: String, fontSize: Float, argb: Int, bold: Boolean = false): ReplaceResult =
+        replace(doc, pageIndex, displayRect, newText, TextFormat(size = fontSize, argb = argb, bold = bold.takeIf { it }))
+
+    /**
+     * Permanently removes the text inside [displayRect] and writes [newText] in its place, matching
+     * the original font (or the closest standard font), size, color and baseline unless [format]
+     * overrides them.
+     */
+    fun replace(doc: PDDocument, pageIndex: Int, displayRect: FRect, newText: String, format: TextFormat): ReplaceResult {
         val page = doc.getPage(pageIndex)
         val g = PageGeometry.of(page)
+        val probed = try { TextStyles.probeWithFont(doc, pageIndex, displayRect) } catch (e: Exception) { null }
+        val style = probed?.first
         redactor.redact(
             doc, listOf(RedactionArea(pageIndex, g.rectToUser(displayRect))),
             RedactionOptions(drawFill = false, removeAnnotations = false),
         )
-        if (newText.isBlank()) return
-        val (font, text) = fonts.fontFor(doc, newText, bold)
+        if (newText.isBlank()) return ReplaceResult(style, "", false)
+        val fontSize = format.size ?: style?.size ?: 12f
+        val argb = format.argb ?: style?.argb ?: 0xFF000000.toInt()
+        val family = format.family ?: style?.family ?: FontFamily.SANS
+        val bold = format.bold ?: style?.bold ?: false
+        val italic = format.italic ?: style?.italic ?: false
+        val sameLook = format.family == null && (format.bold == null || format.bold == style?.bold) &&
+            (format.italic == null || format.italic == style?.italic)
+        val original = probed?.second
+        val lines0 = newText.split('\n')
+        val reuse = format.keepOriginalFont && sameLook && original != null &&
+            lines0.all { it.isEmpty() || TextStyles.canRender(original, it) }
+        val (font, text) = if (reuse && original != null) {
+            original to newText
+        } else {
+            val std = TextStyles.standardFont(family, bold, italic)
+            if (FontSelector.canEncode(std, newText.replace("\n", ""))) std to newText else fonts.fontFor(doc, newText, bold)
+        }
+        val origin = style?.origin
         PDPageContentStream(doc, page, PDPageContentStream.AppendMode.APPEND, true, true).use { cs ->
             cs.saveGraphicsState()
             cs.transform(g.displayUpMatrix())
             cs.setNonStrokingColor(Redactor.red(argb), Redactor.green(argb), Redactor.blue(argb))
             cs.beginText()
             cs.setFont(font, fontSize)
-            val leading = fontSize * 1.2f
+            val leading = format.leading ?: (fontSize * 1.2f)
             cs.setLeading(leading)
-            // Baseline of the first line sits ~20% of the line height above the box bottom for one line.
-            val lines = text.split('\n')
-            val firstBaseline = if (lines.size == 1) displayRect.y1 - displayRect.height * 0.22f
-            else displayRect.y0 + fontSize * 0.9f
-            cs.newLineAtOffset(displayRect.x0, g.displayHeight - firstBaseline)
+            val wrapWidth = format.wrapWidth
+            val lines = if (wrapWidth != null && wrapWidth > fontSize) FontSelector.wrap(font, text, fontSize, wrapWidth) else text.split('\n')
+            val startX: Float
+            val firstBaseline: Float
+            if (origin != null && origin.x in displayRect.x0 - 2f..displayRect.x1) {
+                startX = origin.x
+                firstBaseline = origin.y
+            } else {
+                // Baseline of a single line sits ~22% of the line height above the box bottom.
+                startX = displayRect.x0
+                firstBaseline = if (lines.size == 1 && wrapWidth == null) displayRect.y1 - displayRect.height * 0.22f else displayRect.y0 + fontSize * 0.9f
+            }
+            cs.newLineAtOffset(startX, g.displayHeight - firstBaseline)
+            var x = startX
             for ((i, line) in lines.withIndex()) {
-                if (i > 0) cs.newLine()
+                if (i > 0) {
+                    // Wrapped paragraphs continue at the left edge (the first line may be indented).
+                    val nx = if (wrapWidth != null) displayRect.x0 else x
+                    cs.newLineAtOffset(nx - x, -leading)
+                    x = nx
+                }
                 cs.showText(line)
             }
             cs.endText()
             cs.restoreGraphicsState()
         }
+        val usedName = try { font.name } catch (e: Exception) { null } ?: "font"
+        return ReplaceResult(style, usedName.substringAfter('+'), reuse)
     }
 
     /** Adds new text to the page content (not an annotation). [at] is the top-left in display space. */

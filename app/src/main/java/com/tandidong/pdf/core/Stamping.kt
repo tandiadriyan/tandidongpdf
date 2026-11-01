@@ -159,6 +159,32 @@ class Stamper(private val fonts: FontSelector) {
         }
     }
 
+    /**
+     * Page background: fills each page's visible area with [argb] behind the existing content,
+     * or draws [image] stretched over it when given.
+     */
+    fun background(doc: PDDocument, pages: List<Int>, argb: Int, image: PDImageXObject? = null, opacity: Float = 1f) {
+        for (i in pages) {
+            if (i !in 0 until doc.numberOfPages) continue
+            val page = doc.getPage(i)
+            val crop = page.cropBox
+            PDPageContentStream(doc, page, PDPageContentStream.AppendMode.PREPEND, true, true).use { cs ->
+                cs.saveGraphicsState()
+                if (opacity < 1f) setAlpha(cs, opacity)
+                if (image != null) {
+                    val g = PageGeometry.of(page)
+                    cs.transform(g.displayUpMatrix())
+                    cs.drawImage(image, 0f, 0f, g.displayWidth, g.displayHeight)
+                } else {
+                    cs.setNonStrokingColor(((argb shr 16) and 0xFF) / 255f, ((argb shr 8) and 0xFF) / 255f, (argb and 0xFF) / 255f)
+                    cs.addRect(crop.lowerLeftX, crop.lowerLeftY, crop.width, crop.height)
+                    cs.fill()
+                }
+                cs.restoreGraphicsState()
+            }
+        }
+    }
+
     private fun setAlpha(cs: PDPageContentStream, opacity: Float) {
         val gs = PDExtendedGraphicsState()
         gs.nonStrokingAlphaConstant = opacity.coerceIn(0.02f, 1f)
