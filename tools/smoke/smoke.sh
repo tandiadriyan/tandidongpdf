@@ -8,7 +8,11 @@ mkdir -p "$OUT"
 APK=$(ls apk/*.apk | head -n1)
 FAILED=0
 
-shot() { adb exec-out screencap -p > "$OUT/$1.png" 2>/dev/null || true; }
+shot() {
+  adb exec-out screencap -p > "$OUT/$1.png" 2>/dev/null || true
+  dump
+  echo "[$1] $(python3 tools/smoke/labels.py "$OUT/ui.xml")"
+}
 dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb pull /sdcard/ui.xml "$OUT/ui.xml" >/dev/null 2>&1; }
 tap() {
   for _ in 1 2 3 4 5 6; do
