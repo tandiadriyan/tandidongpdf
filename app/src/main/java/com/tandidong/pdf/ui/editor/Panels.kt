@@ -310,7 +310,15 @@ private fun CommentsPanel(c: DocumentController) {
     }
     for (a in list.filter { it.replyTo == null }) addThread(a, 0)
     val topLevel = list.count { it.replyTo == null }
-    Text("Comments ($topLevel)", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 16.dp))
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Comments ($topLevel)", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        if (list.isNotEmpty()) {
+            TextButton(onClick = { c.panel = null; c.openCommentSummary() }) {
+                Icon(Icons.Outlined.Summarize, null)
+                Text(" Summary")
+            }
+        }
+    }
     if (list.isEmpty()) {
         Text("No comments or markups in this document.", modifier = Modifier.padding(16.dp))
     } else {

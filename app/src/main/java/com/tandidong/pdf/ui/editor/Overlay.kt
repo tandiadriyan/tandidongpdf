@@ -203,6 +203,21 @@ private fun DrawScope.drawPending(p: PendingItem, px: Float) {
                 }
                 ShapeKind.LINE, ShapeKind.ARROW -> {
                     drawLine(color, Offset(p.start.x, p.start.y), Offset(p.end.x, p.end.y), strokeWidth = p.width, cap = StrokeCap.Round)
+                    p.caption?.let { cap ->
+                        val dx = p.end.x - p.start.x
+                        val dy = p.end.y - p.start.y
+                        val len = max(0.001f, hypot(dx, dy))
+                        val nx = -dy / len * 5f
+                        val ny = dx / len * 5f
+                        drawLine(color, Offset(p.start.x + nx, p.start.y + ny), Offset(p.start.x - nx, p.start.y - ny), strokeWidth = p.width)
+                        drawLine(color, Offset(p.end.x + nx, p.end.y + ny), Offset(p.end.x - nx, p.end.y - ny), strokeWidth = p.width)
+                        boldPaint.textSize = 10f
+                        boldPaint.color = p.argb
+                        val tw = boldPaint.measureText(cap)
+                        val mx = (p.start.x + p.end.x) / 2f
+                        val my = (p.start.y + p.end.y) / 2f
+                        drawContext.canvas.nativeCanvas.drawText(cap, mx - tw / 2f, my - 6f, boldPaint)
+                    }
                     if (p.kind == ShapeKind.ARROW) {
                         val dx = p.end.x - p.start.x
                         val dy = p.end.y - p.start.y

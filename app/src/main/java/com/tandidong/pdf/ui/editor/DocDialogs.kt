@@ -50,6 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -240,16 +241,22 @@ fun TextInputDialog(
     onConfirm: (String) -> Unit,
 ) {
     var text by remember { mutableStateOf(initial) }
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(Unit) {
+        // Wait a frame for the dialog window, then show the keyboard in the field.
+        kotlinx.coroutines.delay(150)
+        try { focus.requestFocus() } catch (e: IllegalStateException) { }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
             OutlinedTextField(
                 value = text, onValueChange = { text = it },
-                label = label.takeIf { it.isNotEmpty() }?.let { l -> @Composable { Text(l) } },
+                label = label.takeIf { it.isNotEmpty() }?.let { l -> @Composable { Text(l, maxLines = 2) } },
                 singleLine = !multiline, minLines = if (multiline) 3 else 1,
                 keyboardOptions = if (number) KeyboardOptions(keyboardType = KeyboardType.Number) else KeyboardOptions.Default,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
             )
         },
         confirmButton = { TextButton(onClick = { onConfirm(text) }) { Text("OK") } },
@@ -431,10 +438,19 @@ private fun FieldDialog(c: DocumentController, d: DocDialog.FieldEdit, dismiss: 
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 when (f.kind) {
-                    FieldKind.TEXT -> OutlinedTextField(
-                        value = text, onValueChange = { if (f.maxLength <= 0 || it.length <= f.maxLength) text = it },
-                        singleLine = !f.multiline, minLines = if (f.multiline) 3 else 1, modifier = Modifier.fillMaxWidth(),
-                    )
+                    FieldKind.TEXT -> {
+                        OutlinedTextField(
+                            value = text, onValueChange = { if (f.maxLength <= 0 || it.length <= f.maxLength) text = it },
+                            singleLine = !f.multiline, minLines = if (f.multiline) 3 else 1, modifier = Modifier.fillMaxWidth(),
+                        )
+                        val suggestion = com.tandidong.pdf.core.Autofill.suggest(f.label, f.name, c.vm.prefs.autofill)
+                        if (suggestion != null && suggestion.second != text) {
+                            FilterChip(
+                                selected = false, onClick = { text = suggestion.second },
+                                label = { Text("Use ${suggestion.first.label.lowercase()}: ${suggestion.second}", maxLines = 1) },
+                            )
+                        }
+                    }
                     FieldKind.CHECKBOX -> LabeledCheck("Checked", checked) { checked = it }
                     FieldKind.RADIO, FieldKind.COMBO, FieldKind.LIST -> {
                         val values = if (f.kind == FieldKind.RADIO) f.exportValues else f.exportValues.ifEmpty { f.options }

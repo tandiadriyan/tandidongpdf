@@ -109,6 +109,24 @@ fun HomeScreen(vm: AppViewModel) {
         }
     }
 
+    val textLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) scope.launch {
+            try {
+                val name = FileUtil.displayName(context, uri)
+                val file = vm.scratchFile("text-${System.currentTimeMillis()}.pdf")
+                withContext(Dispatchers.IO) {
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: throw java.io.IOException("Couldn't read the file")
+                    if (bytes.size > 20 * 1024 * 1024) throw java.io.IOException("The text file is too large")
+                    val text = String(bytes, Charsets.UTF_8).removePrefix("\uFEFF")
+                    com.tandidong.pdf.core.Reports.textToPdf(text, vm.fonts, name.substringBeforeLast('.')).use { it.save(file) }
+                }
+                vm.openGenerated(file, name.substringBeforeLast('.') + ".pdf")
+            } catch (e: Exception) {
+                vm.message("Couldn't convert: ${e.message}")
+            }
+        }
+    }
+
     fun pick(launch: ToolLaunch?) {
         pendingLaunch = launch
         openLauncher.launch(arrayOf("application/pdf"))
@@ -141,6 +159,7 @@ fun HomeScreen(vm: AppViewModel) {
         HomeTool("Export PDF", Icons.Outlined.IosShare, ToolLaunch.EXPORT),
         HomeTool("Scan", Icons.Outlined.DocumentScanner, action = { scan() }),
         HomeTool("Images to PDF", Icons.Outlined.AddPhotoAlternate, action = { vm.navigate(Screen.ImagesToPdf) }),
+        HomeTool("Text to PDF", Icons.Outlined.TextSnippet, action = { textLauncher.launch(arrayOf("text/*")) }),
         HomeTool("Recognize text", Icons.Outlined.FindInPage, ToolLaunch.OCR),
         HomeTool("Watermark", Icons.Outlined.WaterDrop, ToolLaunch.WATERMARK),
         HomeTool("Page numbers", Icons.Outlined.FormatListNumbered, ToolLaunch.HEADER_FOOTER),

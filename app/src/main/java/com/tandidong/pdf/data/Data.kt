@@ -48,6 +48,31 @@ class AppPrefs(context: Context) {
     var textSize by mutableStateOf(sp.getFloat("text_size", 12f))
         private set
 
+    /** Saved personal details for form filling, keyed by [com.tandidong.pdf.core.AutofillKey.id]. */
+    var autofill by mutableStateOf(loadAutofill())
+        private set
+
+    private fun loadAutofill(): Map<String, String> = try {
+        val o = org.json.JSONObject(sp.getString("autofill", "{}") ?: "{}")
+        o.keys().asSequence().associateWith { o.optString(it) }.filterValues { it.isNotBlank() }
+    } catch (e: Exception) {
+        emptyMap()
+    }
+
+    fun updateAutofill(id: String, value: String) {
+        autofill = (autofill + (id to value)).filterValues { it.isNotBlank() }
+        sp.edit().putString("autofill", org.json.JSONObject(autofill).toString()).apply()
+    }
+
+    var measureUnit by mutableStateOf(sp.getString("measure_unit", "cm") ?: "cm")
+        private set
+    /** Real-world units per paper unit (1 = actual size, 100 = 1:100). */
+    var measureScale by mutableStateOf(sp.getFloat("measure_scale", 1f))
+        private set
+
+    fun updateMeasureUnit(v: String) { measureUnit = v; sp.edit().putString("measure_unit", v).apply() }
+    fun updateMeasureScale(v: Float) { measureScale = v; sp.edit().putFloat("measure_scale", v).apply() }
+
     fun updateTheme(v: Int) { themeMode = v; sp.edit().putInt("theme", v).apply() }
     fun updateAuthor(v: String) { authorName = v; sp.edit().putString("author", v).apply() }
     fun updateKeepScreenOn(v: Boolean) { keepScreenOn = v; sp.edit().putBoolean("keep_screen_on", v).apply() }

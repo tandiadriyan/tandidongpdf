@@ -158,6 +158,24 @@ tap "Comment" && tap_tool "Note" && {
 }
 check_crash "note"
 
+# 5b. Measure a distance, reply to a comment, browse page thumbnails
+ensure_main
+tap "Comment" && tap_tool "Measure" && {
+  adb shell input swipe $((W*20/100)) $((H*70/100)) $((W*70/100)) $((H*70/100)) 600; sleep 2
+  shot 06a-measure; tap "Done"; sleep 4
+}
+check_crash "measure"
+ensure_main
+tap "More options" && tap "Comments list" && {
+  sleep 2
+  if tap "Reply"; then type_text "Looks good"; tap "OK"; sleep 4; shot 06b-reply; fi
+  adb shell input keyevent 4; sleep 2
+}
+check_crash "reply"
+ensure_main
+tap "More options" && tap "Page thumbnails" && { sleep 3; shot 06c-thumbnails; tap "Go to page 2"; sleep 3; }
+check_crash "thumbnails"
+
 # 6. Search & redact email addresses
 ensure_main
 tap "Redact" && tap "Search & redact" && tap "Email addresses" && tap "Find & mark" && {

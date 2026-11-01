@@ -1,5 +1,6 @@
 package com.tandidong.pdf.render
 
+import kotlinx.coroutines.asCoroutineDispatcher
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -37,6 +38,14 @@ interface PageRenderer : Closeable {
 }
 
 object PdfiumSupport {
+    /**
+     * PDFium is not thread-safe: every renderer in the app (all open documents, thumbnails,
+     * comparisons) runs its native calls on this one thread.
+     */
+    val renderExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "pdfium-render").apply { isDaemon = true } }
+    val dispatcher: kotlinx.coroutines.CoroutineDispatcher = renderExecutor.asCoroutineDispatcher()
+
     /** Loads the native libraries once; false when the device cannot run them. */
     val available: Boolean by lazy {
         try {

@@ -61,6 +61,10 @@ sealed class AnnotationSpec {
     data class Shape(
         override val pageIndex: Int, val kind: ShapeKind, val start: Pt, val end: Pt,
         val strokeArgb: Int, val fillArgb: Int?, val width: Float, val opacity: Float = 1f,
+        /** Distance label for measurement lines, e.g. "12.4 cm". */
+        val caption: String? = null,
+        /** Real-world units per point and the unit name, recorded in the /Measure dictionary. */
+        val measure: Pair<Float, String>? = null,
     ) : AnnotationSpec()
     data class Markup(override val pageIndex: Int, val kind: MarkupKind, val rects: List<FRect>, val argb: Int, val text: String? = null) : AnnotationSpec()
     data class Note(override val pageIndex: Int, val at: Pt, val text: String, val argb: Int = 0xFFFFC107.toInt()) : AnnotationSpec()
@@ -173,11 +177,46 @@ class AnnotationWriter(private val author: String, private val fonts: FontSelect
                 a.color = color(s.strokeArgb)
                 if (s.opacity < 1f) a.constantOpacity = s.opacity
                 a.borderStyle = PDBorderStyleDictionary().apply { width = s.width }
+                val caption = s.caption
+                if (caption != null) {
+                    // A distance measurement (Acrobat: LineDimension with a /Measure dictionary).
+                    a.contents = caption
+                    a.cosObject.setBoolean(COSName.getPDFName("Cap"), true)
+                    a.cosObject.setName(COSName.getPDFName("IT"), "LineDimension")
+                    val le = COSArray()
+                    le.add(COSName.getPDFName("Butt")); le.add(COSName.getPDFName("Butt"))
+                    a.cosObject.setItem(COSName.LE, le)
+                    s.measure?.let { (factor, unit) -> a.cosObject.setItem(COSName.getPDFName("Measure"), measureDict(factor, unit)) }
+                    // Draw the caption reading left-to-right on screen.
+                    val flip = s.end.x < s.start.x
+                    val ap = Appearances.dimensionAppearance(doc, if (flip) p2 else p1, if (flip) p1 else p2, caption, s.strokeArgb, s.width, fonts)
+                    a.rectangle = ap.second.toPdRectangle()
+                    a.appearance = ap.first
+                    return a
+                }
                 val ap = Appearances.lineAppearance(doc, p1, p2, s.kind == ShapeKind.ARROW, s.strokeArgb, s.width, s.opacity)
                 a.rectangle = ap.second.toPdRectangle()
                 a.appearance = ap.first
                 a
             }
+        }
+    }
+
+    /** /Measure dictionary for a rectilinear scale: [factor] real units per point. */
+    private fun measureDict(factor: Float, unit: String): COSDictionary {
+        fun fmt(u: String, c: Float) = COSDictionary().apply {
+            setName(COSName.TYPE, "NumberFormat")
+            setString(COSName.getPDFName("U"), u)
+            setFloat(COSName.getPDFName("C"), c)
+            setInt(COSName.D, 100)
+        }
+        return COSDictionary().apply {
+            setName(COSName.TYPE, "Measure")
+            setName(COSName.SUBTYPE, "RL")
+            setString(COSName.getPDFName("R"), "1 pt = ${"%.4f".format(java.util.Locale.US, factor)} $unit")
+            setItem(COSName.getPDFName("X"), COSArray().apply { add(fmt(unit, factor)) })
+            setItem(COSName.D, COSArray().apply { add(fmt(unit, 1f)) })
+            setItem(COSName.A, COSArray().apply { add(fmt("sq $unit", 1f)) })
         }
     }
 
@@ -412,6 +451,50 @@ internal object Appearances {
                 cs.lineTo(right.x, right.y)
             }
             cs.stroke()
+        }
+        return dict(ap) to bbox
+    }
+
+    /** Dimension line: the measured segment, end ticks and a caption above its middle. */
+    fun dimensionAppearance(
+        doc: PDDocument, p1: Pt, p2: Pt, caption: String, argb: Int, width: Float, fonts: FontSelector,
+    ): Pair<PDAppearanceDictionary, FRect> {
+        val dx = p2.x - p1.x
+        val dy = p2.y - p1.y
+        val len = max(0.001f, hypot(dx, dy))
+        val ux = dx / len
+        val uy = dy / len
+        val nx = -uy
+        val ny = ux
+        val tick = max(5f, width * 3f)
+        val size = 9f
+        val (font, text) = fonts.fontFor(doc, caption)
+        val tw = FontSelector.width(font, text, size)
+        val mid = Pt((p1.x + p2.x) / 2f, (p1.y + p2.y) / 2f)
+        val pts = listOf(
+            Pt(p1.x + nx * tick, p1.y + ny * tick), Pt(p1.x - nx * tick, p1.y - ny * tick),
+            Pt(p2.x + nx * tick, p2.y + ny * tick), Pt(p2.x - nx * tick, p2.y - ny * tick),
+            Pt(mid.x - ux * tw / 2f + nx * (size + 4f), mid.y - uy * tw / 2f + ny * (size + 4f)),
+            Pt(mid.x + ux * tw / 2f + nx * (size + 4f), mid.y + uy * tw / 2f + ny * (size + 4f)),
+        )
+        val bbox = FRect.bounds(pts + listOf(p1, p2))!!.outset(width + 3f)
+        val ap = newStream(doc, bbox, null) { cs ->
+            stroke(cs, argb)
+            cs.setLineWidth(width)
+            cs.setLineCapStyle(0)
+            cs.moveTo(p1.x, p1.y); cs.lineTo(p2.x, p2.y)
+            cs.moveTo(pts[0].x, pts[0].y); cs.lineTo(pts[1].x, pts[1].y)
+            cs.moveTo(pts[2].x, pts[2].y); cs.lineTo(pts[3].x, pts[3].y)
+            cs.stroke()
+            fill(cs, argb)
+            cs.beginText()
+            cs.setFont(font, size)
+            // Baseline along the line, a little above it.
+            val ox = mid.x - ux * tw / 2f + nx * 3f
+            val oy = mid.y - uy * tw / 2f + ny * 3f
+            cs.setTextMatrix(com.tom_roush.pdfbox.util.Matrix(ux, uy, -uy, ux, ox, oy))
+            cs.showText(text)
+            cs.endText()
         }
         return dict(ap) to bbox
     }

@@ -215,4 +215,34 @@ class EditExtrasTest {
             }
         }
     }
+
+    @Test
+    fun measurementLineCarriesDistance() {
+        for (rot in listOf(0, 90)) {
+            PDDocument().use { doc ->
+                TestPdfs.addTextPage(doc, listOf("Floor plan"), rotation = rot)
+                com.tandidong.pdf.core.AnnotationWriter("Me", FontSelector(noUnicodeFont)).add(doc, listOf(
+                    com.tandidong.pdf.core.AnnotationSpec.Shape(
+                        0, com.tandidong.pdf.core.ShapeKind.LINE, com.tandidong.pdf.core.Pt(100f, 300f), com.tandidong.pdf.core.Pt(244f, 300f),
+                        0xFFE53935.toInt(), null, 1f, caption = "5.08 cm", measure = (2.54f / 72f) to "cm",
+                    ),
+                ))
+                PDDocument.load(doc.toBytes()).use { d ->
+                    val a = d.getPage(0).annotations.single()
+                    assertEquals("Line", a.subtype)
+                    assertEquals("5.08 cm", a.contents)
+                    assertEquals("LineDimension", a.cosObject.getNameAsString("IT"))
+                    assertNotNull(a.cosObject.getDictionaryObject("Measure"))
+                    // The caption is drawn above the middle of the line (upright on screen).
+                    val img = PDFRenderer(d).renderImage(0, 2f, ImageType.RGB)
+                    var red = 0
+                    for (y in 2 * 285 until 2 * 299) for (x in 2 * 150 until 2 * 195) {
+                        val c = img.getRGB(x, y)
+                        if (((c shr 16) and 0xFF) > 150 && ((c shr 8) and 0xFF) < 120) red++
+                    }
+                    assertTrue(red > 20, "rot=$rot caption pixels=$red")
+                }
+            }
+        }
+    }
 }

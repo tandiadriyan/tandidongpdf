@@ -87,8 +87,9 @@ class DocumentSession(
 
     private val pdfExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "pdf-$id") }
     private val pdf = pdfExecutor.asCoroutineDispatcher()
-    private val renderExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "render-$id") }
-    private val render = renderExecutor.asCoroutineDispatcher()
+    // All PDFium work shares one thread (the library is not thread-safe across documents).
+    private val renderExecutor = com.tandidong.pdf.render.PdfiumSupport.renderExecutor
+    private val render = com.tandidong.pdf.render.PdfiumSupport.dispatcher
     private val mutex = Mutex()
 
     private var reader: PDDocument? = null
@@ -342,7 +343,6 @@ class DocumentSession(
             pdfExecutor.execute { workDir.deleteRecursively() }
         } finally {
             pdfExecutor.shutdown()
-            renderExecutor.shutdown()
         }
     }
 

@@ -11,6 +11,10 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -303,8 +307,52 @@ fun CompareScreen(vm: AppViewModel) {
     var result by remember { mutableStateOf<List<PageDiff>?>(null) }
     var summary by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf<String?>(null) }
-    val pickA = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { if (it != null) { a = it; result = null } }
-    val pickB = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { if (it != null) { b = it; result = null } }
+    var visual by remember { mutableStateOf<List<VisualDiff>?>(null) }
+    val pickA = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { if (it != null) { a = it; result = null; visual = null } }
+    val pickB = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { if (it != null) { b = it; result = null; visual = null } }
+
+    /** Renders both documents page by page and highlights pixel differences. */
+    suspend fun compareVisually(ua: Uri, ub: Uri): List<VisualDiff>? {
+        val ia = vm.importForReading(ua) ?: return null
+        val ib = vm.importForReading(ub) ?: return null
+        return withContext(com.tandidong.pdf.render.PdfiumSupport.dispatcher) {
+            val ra = com.tandidong.pdf.render.RendererFactory.open(context, ia.first, ia.second)
+            val rb = com.tandidong.pdf.render.RendererFactory.open(context, ib.first, ib.second)
+            try {
+                val ga = PdfIO.load(ia.first, ia.second).use { d -> (0 until d.numberOfPages).map { com.tandidong.pdf.core.PageGeometry.of(d.getPage(it)) } }
+                val gb = PdfIO.load(ib.first, ib.second).use { d -> (0 until d.numberOfPages).map { com.tandidong.pdf.core.PageGeometry.of(d.getPage(it)) } }
+                val width = 720
+                val out = ArrayList<VisualDiff>()
+                for (i in 0 until maxOf(ga.size, gb.size)) {
+                    val pa = ga.getOrNull(i)
+                    val pb = gb.getOrNull(i)
+                    if (pa == null || pb == null) {
+                        out.add(VisualDiff(i, null, 1f, if (pa == null) "Page added" else "Page removed", 0))
+                        continue
+                    }
+                    val ba = com.tandidong.pdf.render.RendererFactory.renderPage(ra, i, pa, width)
+                    val bb = com.tandidong.pdf.render.RendererFactory.renderPage(rb, i, pb, width)
+                    val pxa = IntArray(ba.width * ba.height).also { ba.getPixels(it, 0, ba.width, 0, 0, ba.width, ba.height) }
+                    val pxb = IntArray(bb.width * bb.height).also { bb.getPixels(it, 0, bb.width, 0, 0, bb.width, bb.height) }
+                    val r = com.tandidong.pdf.core.PixelDiff.compare(pxa, ba.width, ba.height, pxb, bb.width, bb.height)
+                    val wa = ba.width
+                    ba.recycle(); bb.recycle()
+                    if (r.changedPixels == 0) continue
+                    val img = android.graphics.Bitmap.createBitmap(r.overlay, r.width, r.height, android.graphics.Bitmap.Config.ARGB_8888)
+                    // Outline each changed area so small edits stand out.
+                    val canvas = android.graphics.Canvas(img)
+                    val paint = android.graphics.Paint().apply { style = android.graphics.Paint.Style.STROKE; strokeWidth = 3f; color = 0xFFE53935.toInt() }
+                    for (reg in r.regions) canvas.drawRect(reg.x0 - 3, reg.y0 - 3, reg.x1 + 3, reg.y1 + 3, paint)
+                    out.add(VisualDiff(i, img.asImageBitmap(), r.changedFraction, null, r.regions.size))
+                    check(wa > 0)
+                }
+                out
+            } finally {
+                ra.close(); rb.close()
+                ia.first.delete(); ib.first.delete()
+            }
+        }
+    }
 
     suspend fun texts(uri: Uri): List<String>? {
         val imported = vm.importForReading(uri) ?: return null
@@ -341,6 +389,7 @@ fun CompareScreen(vm: AppViewModel) {
                                 }
                             }
                             result = diffs
+                            visual = null
                             summary = if (diffs.isEmpty()) "No text differences found (${ta.size} vs ${tb.size} pages)."
                             else "${diffs.size} page(s) changed · ${diffs.sumOf { it.inserted }} words added · ${diffs.sumOf { it.deleted }} words removed" +
                                 if (ta.size != tb.size) " · page count ${ta.size} → ${tb.size}" else ""
@@ -353,7 +402,48 @@ fun CompareScreen(vm: AppViewModel) {
                 },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
             ) { Text("Compare text") }
+            OutlinedButton(
+                enabled = a != null && b != null,
+                onClick = {
+                    val ua = a ?: return@OutlinedButton
+                    val ub = b ?: return@OutlinedButton
+                    scope.launch {
+                        busy = "Comparing pages…"
+                        try {
+                            val v = compareVisually(ua, ub) ?: return@launch
+                            result = null
+                            visual = v
+                            summary = if (v.isEmpty()) "The pages look identical." else "${v.size} page(s) look different."
+                        } catch (e: Exception) {
+                            vm.message("Compare failed: ${e.message}")
+                        } finally {
+                            busy = null
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            ) { Text("Compare visually") }
             if (summary.isNotEmpty()) Text(summary, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(12.dp))
+            visual?.let { v ->
+                LazyColumn(Modifier.weight(1f)) {
+                    itemsIndexed(v) { _, d ->
+                        Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                            Column(Modifier.padding(12.dp)) {
+                                val pct = (d.changed * 100f)
+                                Text(
+                                    "Page ${d.page + 1}  ·  " + (d.note ?: ("${d.regions} changed area${if (d.regions == 1) "" else "s"} · " +
+                                        (if (pct < 0.1f) "<0.1" else "%.1f".format(pct)) + "% of the page")),
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                d.image?.let {
+                                    Spacer(Modifier.height(6.dp))
+                                    androidx.compose.foundation.Image(it, "Differences on page ${d.page + 1}", modifier = Modifier.fillMaxWidth())
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             val r = result
             if (r != null) {
                 LazyColumn(Modifier.weight(1f)) {
@@ -372,6 +462,9 @@ fun CompareScreen(vm: AppViewModel) {
     }
     busy?.let { BusyOverlay(it, null) }
 }
+
+/** One page of a visual comparison; [image] shows the revised page with changes in red. */
+class VisualDiff(val page: Int, val image: androidx.compose.ui.graphics.ImageBitmap?, val changed: Float, val note: String?, val regions: Int)
 
 private fun diffText(chunks: List<TextDiff.Chunk>) = buildAnnotatedString {
     for (c in chunks) {
@@ -394,37 +487,74 @@ private fun diffText(chunks: List<TextDiff.Chunk>) = buildAnnotatedString {
 fun ReflowScreen(vm: AppViewModel, session: DocumentSession) {
     var pages by remember { mutableStateOf<List<PageText>?>(null) }
     var scale by remember { mutableStateOf(1f) }
-    LaunchedEffect(session.version) { pages = try { session.allText() } catch (e: Exception) { emptyList() } }
+    val scope = rememberCoroutineScope()
+    // Translation state: translated paragraph texts keyed by page, null when showing the original.
+    var translated by remember { mutableStateOf<Map<Int, List<String>>?>(null) }
+    var showTranslation by remember { mutableStateOf(true) }
+    var translating by remember { mutableStateOf<Float?>(null) }
+    var pickLanguage by remember { mutableStateOf(false) }
+    LaunchedEffect(session.version) { pages = try { session.allText() } catch (e: Exception) { emptyList() }; translated = null }
+    val paragraphs = remember(pages) { pages?.map { DocxWriter.paragraphs(it) } }
+
+    fun startTranslation(target: String) {
+        val paras = paragraphs ?: return
+        scope.launch {
+            translating = 0f
+            try {
+                val flat = paras.flatten().map { it.text }
+                val source = DocTranslator.detect(flat.joinToString(" ").take(4000))
+                if (source == null) { vm.message("Couldn't detect the document's language"); return@launch }
+                if (source == target) { vm.message("The document is already in that language"); return@launch }
+                val out = DocTranslator.translate(flat, source, target) { d, t -> translating = d.toFloat() / t }
+                var k = 0
+                translated = paras.withIndex().associate { (i, list) -> i to list.map { out[k++] } }
+                showTranslation = true
+            } catch (e: Exception) {
+                vm.message(e.message ?: "Translation failed")
+            } finally {
+                translating = null
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Liquid mode", maxLines = 1) },
-                navigationIcon = { IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
-                actions = {
-                    IconButton(onClick = { scale = (scale - 0.1f).coerceAtLeast(0.7f) }) { Icon(Icons.Outlined.TextDecrease, "Smaller text") }
-                    IconButton(onClick = { scale = (scale + 0.1f).coerceAtMost(2.2f) }) { Icon(Icons.Outlined.TextIncrease, "Larger text") }
-                },
-            )
+            Column {
+                TopAppBar(
+                    title = { Text("Liquid mode", maxLines = 1) },
+                    navigationIcon = { IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                    actions = {
+                        if (translated != null) {
+                            TextButton(onClick = { showTranslation = !showTranslation }) { Text(if (showTranslation) "Original" else "Translation") }
+                        }
+                        IconButton(onClick = { pickLanguage = true }, enabled = translating == null) { Icon(Icons.Outlined.Translate, "Translate") }
+                        IconButton(onClick = { scale = (scale - 0.1f).coerceAtLeast(0.7f) }) { Icon(Icons.Outlined.TextDecrease, "Smaller text") }
+                        IconButton(onClick = { scale = (scale + 0.1f).coerceAtMost(2.2f) }) { Icon(Icons.Outlined.TextIncrease, "Larger text") }
+                    },
+                )
+                translating?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth()) }
+            }
         },
     ) { padding ->
         val list = pages
-        if (list == null) {
+        val paras = paragraphs
+        if (list == null || paras == null) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { Text("Preparing reading view…") }
         } else if (list.all { it.isBlank }) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Text("No text found. If this is a scanned document, use Recognize text (OCR) first.", modifier = Modifier.padding(32.dp))
             }
         } else {
+            val tr = translated?.takeIf { showTranslation }
             LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 32.dp)) {
-                itemsIndexed(list) { i, page ->
+                itemsIndexed(paras) { i, pageParas ->
                     Column {
                         Text("Page ${i + 1}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
-                        val paras = DocxWriter.paragraphs(page)
-                        val body = paras.map { it.sizePt }.sorted().let { if (it.isEmpty()) 11f else it[it.size / 2] }
-                        for (p in paras) {
+                        val body = pageParas.map { it.sizePt }.sorted().let { if (it.isEmpty()) 11f else it[it.size / 2] }
+                        for ((k, p) in pageParas.withIndex()) {
                             val heading = p.sizePt > body * 1.25f
                             Text(
-                                p.text,
+                                tr?.get(i)?.getOrNull(k) ?: p.text,
                                 fontSize = ((if (heading) 20f else 16f) * scale).sp,
                                 lineHeight = ((if (heading) 26f else 24f) * scale).sp,
                                 fontWeight = if (heading || p.bold) FontWeight.SemiBold else FontWeight.Normal,
@@ -435,6 +565,26 @@ fun ReflowScreen(vm: AppViewModel, session: DocumentSession) {
                 }
             }
         }
+    }
+
+    if (pickLanguage) {
+        val langs = remember { DocTranslator.languages() }
+        val def = remember { DocTranslator.defaultTarget() }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pickLanguage = false },
+            title = { Text("Translate to") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    itemsIndexed(langs.sortedByDescending { it.first == def }) { _, (code, name) ->
+                        Text(
+                            name + if (code == def) " (device language)" else "",
+                            modifier = Modifier.fillMaxWidth().clickable { pickLanguage = false; startTranslation(code) }.padding(vertical = 12.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { pickLanguage = false }) { Text("Cancel") } },
+        )
     }
 }
 

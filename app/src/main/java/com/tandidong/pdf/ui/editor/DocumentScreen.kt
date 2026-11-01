@@ -642,6 +642,7 @@ fun toolIcon(t: Tool): ImageVector = when (t) {
     Tool.ELLIPSE -> Icons.Outlined.Circle
     Tool.LINE -> Icons.Outlined.HorizontalRule
     Tool.ARROW -> Icons.Outlined.NorthEast
+    Tool.MEASURE -> Icons.Outlined.Straighten
     Tool.NOTE -> Icons.Outlined.StickyNote2
     Tool.TEXT_BOX -> Icons.Outlined.TextFields
     Tool.STAMP -> Icons.Outlined.Approval
@@ -722,7 +723,7 @@ private fun ToolOptionsRow(c: DocumentController) {
     val target: Int? = when {
         t == Tool.HIGHLIGHT -> prefs.highlightColor
         t == Tool.PEN -> prefs.penColor
-        t.isMarkup || t.shapeKind != null -> prefs.shapeColor
+        t.isMarkup || t.shapeKind != null || t == Tool.MEASURE -> prefs.shapeColor
         t == Tool.TEXT_BOX || t == Tool.FILL_TEXT || t == Tool.ADD_TEXT || t == Tool.FILL_DATE ||
             t == Tool.FILL_CHECK || t == Tool.FILL_CROSS || t == Tool.FILL_DOT -> prefs.textColor
         else -> null
@@ -772,7 +773,7 @@ private fun ToolOptionsRow(c: DocumentController) {
                                 when {
                                     t == Tool.HIGHLIGHT -> prefs.updateHighlightColor(col)
                                     t == Tool.PEN -> prefs.updatePenColor(col)
-                                    t.isMarkup || t.shapeKind != null -> prefs.updateShapeColor(col)
+                                    t.isMarkup || t.shapeKind != null || t == Tool.MEASURE -> prefs.updateShapeColor(col)
                                     else -> prefs.updateTextColor(col)
                                 }
                             }
@@ -794,6 +795,32 @@ private fun ToolOptionsRow(c: DocumentController) {
                     IconButton(onClick = { prefs.updateTextSize((prefs.textSize - 1f).coerceAtLeast(6f)) }) { Icon(Icons.Outlined.TextDecrease, "Smaller") }
                     Text("${prefs.textSize.toInt()} pt", fontWeight = FontWeight.Medium)
                     IconButton(onClick = { prefs.updateTextSize((prefs.textSize + 1f).coerceAtMost(72f)) }) { Icon(Icons.Outlined.TextIncrease, "Larger") }
+                }
+                if (t == Tool.MEASURE) {
+                    Spacer(Modifier.width(8.dp))
+                    for (u in listOf("mm", "cm", "m", "in", "ft", "pt")) {
+                        androidx.compose.material3.FilterChip(
+                            selected = prefs.measureUnit == u, onClick = { prefs.updateMeasureUnit(u) }, label = { Text(u) },
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    for (sc in listOf(1f, 10f, 50f, 100f, 1000f)) {
+                        androidx.compose.material3.FilterChip(
+                            selected = prefs.measureScale == sc, onClick = { prefs.updateMeasureScale(sc) },
+                            label = { Text("1:${sc.toInt()}") },
+                        )
+                    }
+                }
+                if (t == Tool.FILL_TEXT) {
+                    // Autofill: pick a saved detail, then tap where it goes.
+                    for (key in com.tandidong.pdf.core.Autofill.KEYS) {
+                        val v = prefs.autofill[key.id] ?: continue
+                        androidx.compose.material3.FilterChip(
+                            selected = c.editor.autofillText == v,
+                            onClick = { c.editor.autofillText = if (c.editor.autofillText == v) null else v },
+                            label = { Text(v, maxLines = 1) },
+                        )
+                    }
                 }
             }
         }

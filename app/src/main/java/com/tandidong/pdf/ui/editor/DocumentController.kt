@@ -264,6 +264,23 @@ class DocumentController(
         }
     }
 
+    /** Builds a PDF listing every comment and opens it as a new document. */
+    fun openCommentSummary() {
+        scope.launch {
+            try {
+                val file = vm.scratchFile("comments-${System.currentTimeMillis()}.pdf")
+                session.task("Summarizing comments…") {
+                    session.read { doc ->
+                        com.tandidong.pdf.core.Reports.commentSummary(doc, session.displayName, fonts).use { it.save(file) }
+                    }
+                }
+                vm.openGenerated(file, "Comments - " + com.tandidong.pdf.data.FileUtil.baseName(session.displayName) + ".pdf")
+            } catch (e: Exception) {
+                vm.message("Couldn't summarize comments: ${e.message}")
+            }
+        }
+    }
+
     fun loadAttachments() {
         scope.launch {
             attachments = try { session.read { com.tandidong.pdf.core.Attachments.list(it) } } catch (e: Exception) { emptyList() }
@@ -650,6 +667,12 @@ class DocumentController(
                     editor.active = ink.copy(strokes = ink.strokes.dropLast(1) + listOf(stroke + hit.pt))
                 }
             }
+            t == Tool.MEASURE -> {
+                val (factor, unit) = measureFactor()
+                val d = hypot(hit.pt.x - start.pt.x, hit.pt.y - start.pt.y) * factor
+                val caption = formatMeasure(d, unit)
+                editor.active = PendingItem.Shape(page, ShapeKind.LINE, start.pt, hit.pt, vm.prefs.shapeColor, null, 1f, caption, factor to unit)
+            }
             t.shapeKind != null -> {
                 val kind = t.shapeKind ?: return
                 editor.active = PendingItem.Shape(page, kind, start.pt, hit.pt, vm.prefs.shapeColor, null, vm.prefs.penWidth)
@@ -799,6 +822,23 @@ class DocumentController(
         dragStart = null
     }
 
+    /** Real-world [unit]s per PDF point at the current measuring scale. */
+    fun measureFactor(): Pair<Float, String> {
+        val unit = vm.prefs.measureUnit
+        val perPoint = when (unit) {
+            "in" -> 1f / 72f
+            "mm" -> 25.4f / 72f
+            "pt" -> 1f
+            "ft" -> 1f / 864f
+            "m" -> 0.0254f / 72f
+            else -> 2.54f / 72f // cm
+        }
+        return perPoint * vm.prefs.measureScale to unit
+    }
+
+    private fun formatMeasure(value: Float, unit: String): String =
+        (if (value >= 100f) "%.0f" else if (value >= 10f) "%.1f" else "%.2f").format(Locale.getDefault(), value) + " " + unit
+
     private fun isMeaningful(p: PendingItem): Boolean = when (p) {
         is PendingItem.Markup -> p.rects.isNotEmpty() && p.rects.any { it.width > 1f }
         is PendingItem.Shape -> hypot(p.end.x - p.start.x, p.end.y - p.start.y) > 3f
@@ -849,7 +889,16 @@ class DocumentController(
             Tool.TEXT_BOX -> dialog = DocDialog.TextEntry(p, pt, TextPurpose.COMMENT_BOX)
             Tool.FILL_TEXT -> {
                 val f = fieldAt(hit)
-                if (f != null) openField(f, p) else dialog = DocDialog.TextEntry(p, pt, TextPurpose.FILL)
+                val armed = editor.autofillText
+                when {
+                    f != null -> openField(f, p)
+                    armed != null -> {
+                        editor.autofillText = null
+                        val size = vm.prefs.textSize
+                        editor.addPending(textBox(p, Pt(pt.x, pt.y - size * 0.6f), armed, size, vm.prefs.textColor, border = false, asContent = false))
+                    }
+                    else -> dialog = DocDialog.TextEntry(p, pt, TextPurpose.FILL)
+                }
             }
             Tool.ADD_TEXT -> dialog = DocDialog.TextEntry(p, pt, TextPurpose.CONTENT)
             Tool.FILL_DATE -> {

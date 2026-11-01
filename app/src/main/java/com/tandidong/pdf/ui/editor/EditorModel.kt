@@ -38,6 +38,7 @@ enum class Tool(val label: String, val category: ToolCategory?, val dragTool: Bo
     ELLIPSE("Ellipse", ToolCategory.COMMENT, true),
     LINE("Line", ToolCategory.COMMENT, true),
     ARROW("Arrow", ToolCategory.COMMENT, true),
+    MEASURE("Measure", ToolCategory.COMMENT, true),
     NOTE("Note", ToolCategory.COMMENT),
     TEXT_BOX("Text box", ToolCategory.COMMENT),
     STAMP("Stamp", ToolCategory.COMMENT),
@@ -118,7 +119,10 @@ sealed class PendingItem {
     data class Ink(override val page: Int, val strokes: List<List<Pt>>, val argb: Int, val width: Float, val opacity: Float) : PendingItem() {
         override fun bounds() = FRect.bounds(strokes.flatten())?.outset(width) ?: FRect(0f, 0f, 0f, 0f)
     }
-    data class Shape(override val page: Int, val kind: ShapeKind, val start: Pt, val end: Pt, val argb: Int, val fill: Int?, val width: Float) : PendingItem() {
+    data class Shape(
+        override val page: Int, val kind: ShapeKind, val start: Pt, val end: Pt, val argb: Int, val fill: Int?, val width: Float,
+        val caption: String? = null, val measure: Pair<Float, String>? = null,
+    ) : PendingItem() {
         override fun bounds() = FRect.of(start, end).outset(width + 6f)
     }
     data class Markup(override val page: Int, val kind: MarkupKind, val rects: List<FRect>, val argb: Int, val text: String?) : PendingItem() {
@@ -143,7 +147,7 @@ sealed class PendingItem {
     /** Converts to a core annotation spec (null for items written as page content). */
     fun toSpec(): AnnotationSpec? = when (this) {
         is Ink -> AnnotationSpec.Ink(page, strokes, argb, width, opacity)
-        is Shape -> AnnotationSpec.Shape(page, kind, start, end, argb, fill, width)
+        is Shape -> AnnotationSpec.Shape(page, kind, start, end, argb, fill, width, caption = caption, measure = measure)
         is Markup -> AnnotationSpec.Markup(page, kind, rects, argb, text)
         is Note -> AnnotationSpec.Note(page, at, text, argb)
         is TextBox -> if (asContent) null else AnnotationSpec.FreeText(page, rect, text, size, argb, if (border) argb else null, null)
@@ -181,6 +185,8 @@ class EditorState {
     var signature by mutableStateOf<SavedSignature?>(null)
     var initials by mutableStateOf<SavedSignature?>(null)
     var imageToPlace by mutableStateOf<Bitmap?>(null)
+    /** Autofill value armed for the next tap with the Fill & Sign text tool. */
+    var autofillText by mutableStateOf<String?>(null)
     var selection by mutableStateOf<TextSelection?>(null)
     var annotations by mutableStateOf<List<AnnotationInfo>>(emptyList())
     var selectedAnnot by mutableStateOf<AnnotationInfo?>(null)

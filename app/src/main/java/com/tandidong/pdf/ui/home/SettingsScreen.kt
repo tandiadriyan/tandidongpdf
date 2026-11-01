@@ -69,6 +69,21 @@ fun SettingsScreen(vm: AppViewModel) {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
             )
             HorizontalDivider(Modifier.padding(top = 16.dp))
+            Text("Autofill", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp))
+            Text(
+                "Saved on this device and offered when you fill forms (Fill & Sign → Text).",
+                style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp),
+            )
+            for (key in com.tandidong.pdf.core.Autofill.KEYS) {
+                OutlinedTextField(
+                    value = p.autofill[key.id] ?: "",
+                    onValueChange = { p.updateAutofill(key.id, it) },
+                    label = { Text(key.label) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                )
+            }
+            HorizontalDivider(Modifier.padding(top = 16.dp))
             Text("Digital IDs", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp))
             val ids = vm.digitalIds.items
             if (ids.isEmpty()) {
@@ -118,7 +133,7 @@ fun SettingsScreen(vm: AppViewModel) {
                     Text(
                         "Everything runs on your device; documents are never uploaded.\n\n" +
                             "Open-source components: PdfBox-Android (Apache License 2.0), " +
-                            "PdfiumAndroid / PDFium (Apache License 2.0 / BSD), " +
+                            "PdfiumAndroid / PDFium (Apache License 2.0 / BSD), Bouncy Castle (MIT), " +
                             "Jetpack Compose (Apache License 2.0), Google ML Kit (text recognition and document scanner).",
                     )
                 },
