@@ -1,0 +1,55 @@
+name: Android CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: Core PDF engine tests (JVM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run core engine tests
+        run: ./gradlew -p tools/core-tests test --no-daemon --stacktrace
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-report
+          path: tools/core-tests/build/reports/tests/
+
+  build:
+    name: Build APKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tandidong-pdf-debug
+          path: app/build/outputs/apk/debug/*.apk
+      - name: Build release APK (minified)
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tandidong-pdf-release
+          path: app/build/outputs/apk/release/*.apk

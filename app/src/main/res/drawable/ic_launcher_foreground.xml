@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Document with a folded corner and a pen stroke, centered in the 108dp adaptive icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,30h22l12,12v34c0,1.1 -0.9,2 -2,2H38c-1.1,0 -2,-0.9 -2,-2V32c0,-1.1 0.9,-2 2,-2z" />
+    <path
+        android:fillColor="#FFCDD2"
+        android:pathData="M60,30v10c0,1.1 0.9,2 2,2h10z" />
+    <path
+        android:fillColor="#C62828"
+        android:pathData="M42,50h20v3H42zM42,57h24v3H42zM42,64h16v3H42z" />
+    <path
+        android:fillColor="#212121"
+        android:pathData="M64,70l14,-14l4,4l-14,14l-5,1z" />
+</vector>
