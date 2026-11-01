@@ -239,10 +239,15 @@ class DocumentSession(
         val geo = geometries.getOrNull(page) ?: return@withContext null
         val file = currentFile
         try {
-            RendererFactory.renderPage(rendererFor(file), page, geo, width, annotations)
+            val start = android.os.SystemClock.elapsedRealtime()
+            val r = rendererFor(file)
+            RendererFactory.renderPage(r, page, geo, width, annotations).also {
+                android.util.Log.d("TandidongRender", "page=$page width=$width ms=${android.os.SystemClock.elapsedRealtime() - start} engine=${r.javaClass.simpleName}")
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
+            android.util.Log.e("TandidongRender", "render failed for page $page", t)
             null
         }
     }

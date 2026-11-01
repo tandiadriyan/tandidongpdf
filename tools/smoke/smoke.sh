@@ -6,40 +6,52 @@ PKG=com.tandidong.pdf
 OUT=${SMOKE_OUT:-smoke-out}
 mkdir -p "$OUT"
 APK=$(ls apk/*.apk | head -n1)
-FAILED=0
+MISSING=0
 
+dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb pull /sdcard/ui.xml "$OUT/ui.xml" >/dev/null 2>&1; }
 shot() {
   adb exec-out screencap -p > "$OUT/$1.png" 2>/dev/null || true
   dump
   echo "[$1] $(python3 tools/smoke/labels.py "$OUT/ui.xml")"
 }
-dump() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb pull /sdcard/ui.xml "$OUT/ui.xml" >/dev/null 2>&1; }
+find_el() { python3 tools/smoke/ui.py "$OUT/ui.xml" "$1"; }
+has() { dump; find_el "$1" >/dev/null; }
 tap() {
-  for _ in 1 2 3 4 5 6; do
+  for _ in 1 2 3 4 5; do
     dump
-    if c=$(python3 tools/smoke/ui.py "$OUT/ui.xml" "$1"); then
+    if c=$(find_el "$1"); then
       echo "tap '$1' at $c"
       adb shell input tap $c
       sleep 2
       return 0
     fi
-    sleep 2
+    sleep 1.5
   done
   echo "::warning::Element not found: $1"
   shot "missing-$(echo "$1" | tr -c 'a-zA-Z0-9' '_')"
-  FAILED=1
+  MISSING=$((MISSING + 1))
   return 1
 }
-has() { dump; python3 tools/smoke/ui.py "$OUT/ui.xml" "$1" >/dev/null; }
+type_text() { adb shell input text "$(echo "$1" | sed 's/ /%s/g')"; sleep 1; }
 crashed() { adb logcat -d | grep -E "FATAL EXCEPTION|ANR in $PKG" >/dev/null; }
 check_crash() {
   if crashed; then
     echo "::error::App crashed during: $1"
-    adb logcat -d -b crash | tail -n 80
-    adb logcat -d | grep -E -A 40 "FATAL EXCEPTION" | head -n 120
+    adb logcat -d | grep -E -A 50 "FATAL EXCEPTION" | head -n 150
     shot "crash"
     exit 1
   fi
+}
+# Returns to the document's main toolbar (closing tools, dialogs and sheets).
+ensure_main() {
+  for _ in 1 2 3 4 5; do
+    dump
+    if find_el "Comment" >/dev/null && find_el "Tools" >/dev/null; then return 0; fi
+    if c=$(find_el "OK"); then adb shell input tap $c; sleep 2; continue; fi
+    if c=$(find_el "Done"); then adb shell input tap $c; sleep 3; continue; fi
+    if c=$(find_el "Cancel"); then adb shell input tap $c; sleep 2; continue; fi
+    adb shell input keyevent 4; sleep 2
+  done
 }
 
 adb wait-for-device
@@ -62,70 +74,122 @@ adb shell am start -W -n $PKG/.MainActivity >/dev/null
 sleep 4; shot 00-home; check_crash "launch"
 adb shell am start -W -a android.intent.action.VIEW -d "file:///data/data/$PKG/files/inbox/sample.pdf" -t application/pdf -n $PKG/.MainActivity >/dev/null
 sleep 8; shot 01-opened; check_crash "open document"
-has "sample.pdf" || { echo "::error::Document did not open"; FAILED=1; }
+has "sample.pdf" || { echo "::error::Document did not open"; exit 1; }
 
-# 2. Zoom and scroll
+# 2. Scroll, double-tap zoom in and out
 adb shell input swipe $((W/2)) $((H*3/4)) $((W/2)) $((H/4)) 300; sleep 2
 adb shell input swipe $((W/2)) $((H/4)) $((W/2)) $((H*3/4)) 300; sleep 2
-shot 02-scrolled; check_crash "scroll"
+adb shell "input tap $((W/2)) $((H/2)); input tap $((W/2)) $((H/2))"; sleep 3; shot 02-zoomed
+adb shell "input tap $((W/2)) $((H/2)); input tap $((W/2)) $((H/2))"; sleep 3
+check_crash "scroll and zoom"
 
-# 3. Highlight text with the Comment tools
+# 3. Highlight text
+ensure_main
 tap "Comment" && tap "Highlight" && {
-  adb shell input swipe $((W*15/100)) $((H*30/100)) $((W*85/100)) $((H*30/100)) 600; sleep 2
-  shot 03-highlight-pending
-  tap "Done"; sleep 4; shot 04-highlight-saved
+  adb shell input swipe $((W*15/100)) $((H*25/100)) $((W*85/100)) $((H*25/100)) 600; sleep 2
+  shot 03-highlight-pending; tap "Done"; sleep 4; shot 04-highlight-saved
 }
 check_crash "highlight"
 
 # 4. Draw with the pen
+ensure_main
 tap "Comment" && tap "Draw" && {
   adb shell input swipe $((W*30/100)) $((H*55/100)) $((W*60/100)) $((H*62/100)) 500; sleep 1
   tap "Done"; sleep 4; shot 05-ink
 }
 check_crash "pen"
 
-# 5. Search & redact email addresses
+# 5. Sticky note
+ensure_main
+tap "Comment" && tap "Note" && {
+  adb shell input tap $((W*70/100)) $((H*40/100)); sleep 2
+  type_text "Smoke test note"; tap "OK"; tap "Done"; sleep 4; shot 06-note
+}
+check_crash "note"
+
+# 6. Search & redact email addresses
+ensure_main
 tap "Redact" && tap "Search & redact" && tap "Email addresses" && tap "Find & mark" && {
-  sleep 4; shot 06-redact-marked
-  tap "Apply*" && tap "Apply" && { sleep 6; shot 07-redacted; tap "OK"; }
+  sleep 4; shot 07-redact-marked
+  tap "Apply*" && tap "Apply" && { sleep 6; shot 08-redacted; tap "OK"; }
 }
 check_crash "redact"
 
-# 6. Fill & Sign: add a date
+# 7. Fill & Sign: date and the form field
+ensure_main
 tap "Fill & Sign" && tap "Date" && {
   adb shell input tap $((W/2)) $((H*45/100)); sleep 1
-  tap "Done"; sleep 4; shot 08-date
+  tap "Done"; sleep 4; shot 09-date
+}
+ensure_main
+tap "Fill & Sign" && tap "Fields list" && tap "Full name" && {
+  tap "Full name"; type_text "Ada Lovelace"; tap "Set"; sleep 4; shot 10-form-filled
 }
 check_crash "fill & sign"
 
-# 7. Organize pages
-tap "Pages" && { sleep 4; shot 09-organize; adb shell input keyevent 4; sleep 2; }
+# 8. Edit existing text
+ensure_main
+tap "Edit" && tap "Edit text" && {
+  adb shell input tap $((W*35/100)) $((H*30/100)); sleep 3
+  shot 11-edit-text
+  if has "Replace"; then tap "Replace"; sleep 4; fi
+}
+check_crash "edit text"
+
+# 9. Organize pages: rotate the first page and apply
+ensure_main
+tap "Pages" && {
+  sleep 4; shot 12-organize
+  tap "1" && tap "Rotate right" && tap "Apply" && sleep 4
+  shot 13-organized
+  adb shell input keyevent 4; sleep 2
+}
 check_crash "organize"
 
-# 8. More tools sheet and compression
-tap "More" && { sleep 2; shot 10-more-tools; tap "Compress" && tap "Compress" && { sleep 6; shot 11-compressed; tap "OK"; }; }
+# 10. Tools: compress, watermark, page numbers
+ensure_main
+tap "Tools" && { sleep 2; shot 14-tools; tap "Compress" && tap "Compress" && { sleep 6; shot 15-compressed; tap "OK"; }; }
 check_crash "compress"
+ensure_main
+tap "Tools" && tap "Text watermark" && tap "Add" && { sleep 5; shot 16-watermark; }
+check_crash "watermark"
+ensure_main
+tap "Tools" && tap "Headers & page numbers" && tap "Apply" && { sleep 5; shot 17-page-numbers; }
+check_crash "page numbers"
 
-# 9. Search
+# 11. Search
+ensure_main
 tap "Search" && tap "Search in document" && {
-  adb shell input text revenue; adb shell input keyevent 66; sleep 4; shot 12-search
-  adb shell input keyevent 4; sleep 1          # hide keyboard
-  has "Search in document" && { adb shell input keyevent 4; sleep 1; }   # close search
+  type_text "revenue"; adb shell input keyevent 66; sleep 4; shot 18-search
+  adb shell input keyevent 4; sleep 1
+  has "Search in document" && { adb shell input keyevent 4; sleep 1; }
 }
 check_crash "search"
 
-# 10. Leave the document (discard changes) and return home
-has "sample.pdf" && { adb shell input keyevent 4; sleep 2; }
-if has "Discard"; then tap "Discard"; fi
-sleep 2; shot 13-home-after; check_crash "close"
+# 12. Bookmarks panel
+ensure_main
+tap "More options" && tap "Bookmarks" && { sleep 3; shot 19-bookmarks; adb shell input keyevent 4; sleep 2; }
+check_crash "bookmarks"
 
-# 11. Tools that open their own screens
-tap "Images to PDF" && { sleep 3; shot 14-images; adb shell input keyevent 4; sleep 2; adb shell input keyevent 4; sleep 2; }
-tap "Settings" && { sleep 2; shot 15-settings; adb shell input keyevent 4; sleep 2; }
+# 13. Leave the document (discard changes) and return home
+ensure_main
+adb shell input keyevent 4; sleep 2
+if has "Discard"; then tap "Discard"; fi
+sleep 2; shot 20-home-after; check_crash "close"
+
+# 14. Screens that open from home
+tap "Combine files" && { sleep 2; shot 21-combine; adb shell input keyevent 4; sleep 2; }
+tap "Compare" && { sleep 2; shot 22-compare; adb shell input keyevent 4; sleep 2; }
+tap "Settings" && { sleep 2; shot 23-settings; adb shell input keyevent 4; sleep 2; }
 check_crash "tool screens"
 
-adb logcat -d -s TandidongCore:W AndroidRuntime:E > "$OUT/logcat.txt" 2>/dev/null || true
-if [ "$FAILED" -ne 0 ]; then
-  echo "::warning::Some UI steps could not be completed; see screenshots."
+echo "---- render log ----"
+adb logcat -d -s TandidongRender:D | head -n 15
+echo "rendered pages: $(adb logcat -d -s TandidongRender:D | grep -c 'page=')"
+echo "---- core warnings ----"
+adb logcat -d -s TandidongCore:W | tail -n 40
+adb logcat -d > "$OUT/logcat.txt" 2>/dev/null || true
+if [ "$MISSING" -ne 0 ]; then
+  echo "::warning::$MISSING UI step(s) could not be completed; see screenshots."
 fi
 echo "Smoke test finished without crashes."

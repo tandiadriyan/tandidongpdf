@@ -289,7 +289,7 @@ fun DocumentScreen(vm: AppViewModel, session: DocumentSession, launch: ToolLaunc
                                 IconButton(onClick = { c.redo() }, enabled = c.canRedo) { Icon(Icons.AutoMirrored.Filled.Redo, "Redo") }
                                 IconButton(onClick = { c.searchOpen = true }) { Icon(Icons.Outlined.Search, "Search") }
                                 Box {
-                                    IconButton(onClick = { moreMenu = true }) { Icon(Icons.Outlined.MoreVert, "More") }
+                                    IconButton(onClick = { moreMenu = true }) { Icon(Icons.Outlined.MoreVert, "More options") }
                                     DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
                                         MenuRow("Save", Icons.Outlined.Save) { moreMenu = false; save() }
                                         MenuRow("Save as…", Icons.Outlined.SaveAs) {
@@ -475,7 +475,7 @@ private fun MainToolbar(onCategory: (ToolCategory) -> Unit, onPages: () -> Unit,
         BarButton("Edit", Icons.Outlined.Edit) { onCategory(ToolCategory.EDIT) }
         BarButton("Redact", Icons.Outlined.HideSource) { onCategory(ToolCategory.REDACT) }
         BarButton("Pages", Icons.Outlined.GridView, onClick = onPages)
-        BarButton("More", Icons.Outlined.Apps, onClick = onMore)
+        BarButton("Tools", Icons.Outlined.Apps, onClick = onMore)
     }
 }
 
