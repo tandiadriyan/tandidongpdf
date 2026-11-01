@@ -107,14 +107,15 @@ tap "More" && { sleep 2; shot 10-more-tools; tap "Compress" && tap "Compress" &&
 check_crash "compress"
 
 # 9. Search
-tap "Search" && {
+tap "Search" && tap "Search in document" && {
   adb shell input text revenue; adb shell input keyevent 66; sleep 4; shot 12-search
-  adb shell input keyevent 4; sleep 1; adb shell input keyevent 4; sleep 1
+  adb shell input keyevent 4; sleep 1          # hide keyboard
+  has "Search in document" && { adb shell input keyevent 4; sleep 1; }   # close search
 }
 check_crash "search"
 
 # 10. Leave the document (discard changes) and return home
-adb shell input keyevent 4; sleep 2
+has "sample.pdf" && { adb shell input keyevent 4; sleep 2; }
 if has "Discard"; then tap "Discard"; fi
 sleep 2; shot 13-home-after; check_crash "close"
 
